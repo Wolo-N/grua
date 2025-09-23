@@ -1,11 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-30m Crane Truss Design and Simulation
-=====================================
-This module implements a 30m crane structure using truss elements
-and finite element analysis for structural simulation.
-"""
-
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -91,31 +83,26 @@ def design_crane_geometry():
     # Design parameters
     crane_length = 30.0  # m
     tower_height = 25.0  # m
-    boom_height = 3.0    # m at the end
+    boom_height = 4.0    # m boom depth
     n_boom_segments = 10  # Number of segments along boom
-    n_tower_segments = 8  # Number of segments in tower
 
-    # Calculate positions
+    # Calculate positions for horizontal boom
     boom_x = np.linspace(0, crane_length, n_boom_segments + 1)
-    boom_y_top = np.linspace(tower_height, tower_height + boom_height, n_boom_segments + 1)
-    boom_y_bot = np.linspace(tower_height - 2, tower_height + boom_height - 2, n_boom_segments + 1)
-
-    tower_y = np.linspace(0, tower_height, n_tower_segments + 1)
+    boom_y_top = np.full(n_boom_segments + 1, tower_height + boom_height)  # Top chord horizontal
+    boom_y_bot = np.full(n_boom_segments + 1, tower_height)  # Bottom chord horizontal
 
     # Initialize node coordinates
-    total_nodes = (n_tower_segments + 1) + 2 * (n_boom_segments + 1)
+    total_nodes = 1 + 2 * (n_boom_segments + 1)  # Tower top + boom nodes
     X = np.zeros([total_nodes, 2], float)
 
     node_idx = 0
 
-    # Tower nodes
-    tower_nodes = []
-    for i in range(n_tower_segments + 1):
-        X[node_idx] = [0, tower_y[i]]
-        tower_nodes.append(node_idx)
-        node_idx += 1
+    # Tower base and top
+    X[0] = [0, 35]  # Tower base
+    tower_base = 0
+    node_idx += 1
 
-    # Boom top chord nodes
+    # Boom top chord nodes (starting from tower top)
     boom_top_nodes = []
     for i in range(n_boom_segments + 1):
         X[node_idx] = [boom_x[i], boom_y_top[i]]
@@ -129,16 +116,15 @@ def design_crane_geometry():
         boom_bot_nodes.append(node_idx)
         node_idx += 1
 
-    return X, tower_nodes, boom_top_nodes, boom_bot_nodes
+    return X, tower_base, boom_top_nodes, boom_bot_nodes
 
-def create_crane_connectivity(tower_nodes, boom_top_nodes, boom_bot_nodes):
+def create_crane_connectivity(tower_base, boom_top_nodes, boom_bot_nodes):
     '''Create element connectivity matrix for crane'''
 
     elements = []
 
-    # Tower elements (vertical)
-    for i in range(len(tower_nodes) - 1):
-        elements.append([tower_nodes[i], tower_nodes[i+1]])
+    # Tower element (from base to boom connection)
+    elements.append([tower_base, boom_bot_nodes[0]])  # Tower vertical member
 
     # Boom top chord elements
     for i in range(len(boom_top_nodes) - 1):
@@ -159,24 +145,20 @@ def create_crane_connectivity(tower_nodes, boom_top_nodes, boom_bot_nodes):
         else:
             elements.append([boom_bot_nodes[i], boom_top_nodes[i+1]])
 
-    # Connect tower to boom
-    elements.append([tower_nodes[-1], boom_top_nodes[0]])  # Tower top to boom top
-    elements.append([tower_nodes[-1], boom_bot_nodes[0]])  # Tower top to boom bottom
-
-    # Support cables/ties
-    elements.append([tower_nodes[-3], boom_top_nodes[3]])  # Support tie
-    elements.append([tower_nodes[-5], boom_top_nodes[6]])  # Support tie
+    # Support ties from tower to boom
+    elements.append([tower_base, boom_top_nodes[6]])  # Support tie 1
+    elements.append([tower_base, boom_top_nodes[10]])  # Support tie 2
 
     return np.array(elements, dtype=int)
 
 def crane_simulation():
     '''Main crane simulation function'''
 
-    print("<�  Designing 30m Crane Structure...")
+    print("Designing 30m Crane Structure...")
 
     # Create geometry
-    X, tower_nodes, boom_top_nodes, boom_bot_nodes = design_crane_geometry()
-    C = create_crane_connectivity(tower_nodes, boom_top_nodes, boom_bot_nodes)
+    X, tower_base, boom_top_nodes, boom_bot_nodes = design_crane_geometry()
+    C = create_crane_connectivity(tower_base, boom_top_nodes, boom_bot_nodes)
 
     print(f"Structure created with {X.shape[0]} nodes and {C.shape[0]} elements")
 
@@ -192,11 +174,7 @@ def crane_simulation():
     n_nodes = X.shape[0]
     bc = np.full((n_nodes, 2), False)
     # Fix tower base completely (fixed support)
-    bc[0, :] = True  # Fixed support at tower base
-
-    # Add additional support at tower base to prevent rotation
-    if len(tower_nodes) > 1:
-        bc[1, 0] = True  # Constrain horizontal movement of second tower node
+    bc[tower_base, :] = True  # Fixed support at tower base
 
     # Loads - simulate load at crane tip
     loads = np.zeros([n_nodes, 2], float)
@@ -219,9 +197,9 @@ def crane_simulation():
 
     for iEl in range(C.shape[0]):
         # Use different cross-sections for different member types
-        if iEl < len(tower_nodes) - 1:  # Tower elements
+        if iEl == 0:  # Tower element
             A = A_main
-        elif iEl < len(tower_nodes) - 1 + 2 * (len(boom_top_nodes) - 1):  # Main boom chords
+        elif iEl < 1 + 2 * (len(boom_top_nodes) - 1):  # Main boom chords
             A = A_main
         else:  # Secondary elements
             A = A_secondary
@@ -259,13 +237,13 @@ def crane_simulation():
         d_el = np.concatenate([D[n1], D[n2]])
 
         # Element properties
-        if iEl < len(tower_nodes) - 1:
+        if iEl == 0:  # Tower element
             A = A_main
             member_type = "Tower"
-        elif iEl < len(tower_nodes) - 1 + 2 * (len(boom_top_nodes) - 1):
+        elif iEl < 1 + 2 * (len(boom_top_nodes) - 1):  # Main boom chords
             A = A_main
             member_type = "Boom Chord"
-        else:
+        else:  # Secondary elements
             A = A_secondary
             member_type = "Secondary"
 
