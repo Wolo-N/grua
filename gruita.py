@@ -1,5 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+from matplotlib.colors import Normalize
+import matplotlib.cm as cm
 
 def element_stiffness(n1, n2, A, E):
     '''
@@ -76,6 +79,74 @@ def plot_truss(X, C, title="Truss Structure", scale_factor=1, show_nodes=True):
     plt.grid(True, alpha=0.3)
     plt.axis('equal')
     plt.show()
+
+def plot_stress_heatmap(X, C, stresses, element_areas, title="Stress Distribution Heatmap"):
+    '''
+    Plot truss structure with stress heatmap visualization
+
+    Parameters:
+    -----------
+    X : ndarray
+        Node coordinates
+    C : ndarray
+        Connectivity matrix
+    stresses : ndarray
+        Stress values for each element (Pa)
+    element_areas : list
+        Cross-sectional areas for each element
+    title : str
+        Plot title
+    '''
+    fig, ax = plt.subplots(figsize=(16, 10))
+
+    # Create line segments for each element
+    segments = []
+    for iEl in range(C.shape[0]):
+        n1, n2 = C[iEl]
+        segments.append([(X[n1, 0], X[n1, 1]), (X[n2, 0], X[n2, 1])])
+
+    # Normalize stress values for colormap
+    stress_mpa = stresses / 1e6  # Convert to MPa
+    norm = Normalize(vmin=np.min(stress_mpa), vmax=np.max(stress_mpa))
+
+    # Create colormap (blue for compression, red for tension)
+    cmap = cm.RdBu_r  # Reversed so red is tension, blue is compression
+
+    # Create line collection with colors based on stress
+    lc = LineCollection(segments, cmap=cmap, norm=norm, linewidths=4)
+    lc.set_array(stress_mpa)
+
+    # Add line collection to plot
+    line = ax.add_collection(lc)
+
+    # Add colorbar
+    cbar = fig.colorbar(line, ax=ax, pad=0.02)
+    cbar.set_label('Stress (MPa)\n← Compression | Tension →', rotation=270, labelpad=25)
+
+    # Plot nodes
+    ax.scatter(X[:, 0], X[:, 1], c='black', s=30, zorder=5, alpha=0.5)
+
+    # Labels and formatting
+    ax.set_xlabel('x (m)', fontsize=12)
+    ax.set_ylabel('y (m)', fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect('equal')
+
+    # Auto-scale to fit data
+    ax.autoscale()
+
+    plt.tight_layout()
+    plt.show()
+
+    # Print stress statistics
+    print("\n" + "="*60)
+    print("STRESS ANALYSIS SUMMARY")
+    print("="*60)
+    print(f"Maximum Tensile Stress:     {np.max(stress_mpa):8.2f} MPa")
+    print(f"Maximum Compressive Stress: {np.min(stress_mpa):8.2f} MPa")
+    print(f"Average Stress Magnitude:   {np.mean(np.abs(stress_mpa)):8.2f} MPa")
+    print("="*60)
 
 def design_crane_geometry():
     '''Design 30m crane truss geometry'''
@@ -173,12 +244,14 @@ def crane_simulation():
     # Boundary conditions
     n_nodes = X.shape[0]
     bc = np.full((n_nodes, 2), False)
-    # Fix tower base completely (fixed support)
+    # Fix all nodes at x=0 (tower base and left-side boom nodes)
     bc[tower_base, :] = True  # Fixed support at tower base
+    bc[boom_top_nodes[0], :] = True  # Fixed support at top left boom node
+    bc[boom_bot_nodes[0], :] = True  # Fixed support at bottom left boom node
 
     # Loads - simulate load at crane tip
     loads = np.zeros([n_nodes, 2], float)
-    tip_load = 50000  # N (50 kN vertical load at tip)
+    tip_load = 500000  # N (50 kN vertical load at tip)
     loads[boom_top_nodes[-1], 1] = -tip_load  # Vertical load at boom tip
     loads[boom_bot_nodes[-1], 1] = -tip_load/2  # Distribute some load to bottom chord
 
@@ -225,12 +298,15 @@ def crane_simulation():
               f"30m Crane - Deformed Shape (Scale: {scale_factor}x)",
               show_nodes=False)
 
-    # Calculate member forces
+    # Calculate member forces and stresses
     print("\n=� Member Force Analysis:")
     print("=" * 50)
 
     max_tension = 0
     max_compression = 0
+    element_forces = np.zeros(C.shape[0])
+    element_stresses = np.zeros(C.shape[0])
+    element_areas = []
 
     for iEl in range(C.shape[0]):
         n1, n2 = C[iEl]
@@ -247,14 +323,26 @@ def crane_simulation():
             A = A_secondary
             member_type = "Secondary"
 
+        element_areas.append(A)
+
         # Calculate element force
         k_el = element_stiffness(X[n1], X[n2], A, E)
         f_el = k_el @ d_el
 
-        # Axial force (first DOF is axial)
-        length = np.linalg.norm(X[n2] - X[n1])
-        dx = X[n2,0] - X[n1,0]
-        axial_force = -f_el[0] * np.sign(dx) if dx != 0 else -f_el[1]
+        # Calculate axial force using element vector
+        d_vec = X[n2] - X[n1]
+        L = np.linalg.norm(d_vec)
+        # Unit vector
+        e = d_vec / L
+        # Project forces onto element axis
+        # Positive = tension, Negative = compression
+        axial_force = -np.dot([f_el[2] - f_el[0], f_el[3] - f_el[1]], e)
+
+        # Calculate stress (force/area)
+        stress = axial_force / A
+
+        element_forces[iEl] = axial_force
+        element_stresses[iEl] = stress
 
         if axial_force > max_tension:
             max_tension = axial_force
@@ -284,6 +372,10 @@ def crane_simulation():
         print("Structure is SAFE under applied loads")
     else:
         print("Structure may be OVERSTRESSED - consider increasing member sizes")
+
+    # Plot stress heatmap
+    plot_stress_heatmap(X, C, element_stresses, element_areas,
+                       title="Crane Stress Distribution - Color-coded by Stress Level")
 
     return X, C, D, loads
 
