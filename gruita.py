@@ -253,7 +253,6 @@ def crane_simulation():
     loads = np.zeros([n_nodes, 2], float)
     tip_load = 500000  # N (50 kN vertical load at tip)
     loads[boom_top_nodes[-1], 1] = -tip_load  # Vertical load at boom tip
-    loads[boom_bot_nodes[-1], 1] = -tip_load/2  # Distribute some load to bottom chord
 
     # Self-weight (approximate)
     for node in boom_top_nodes + boom_bot_nodes:

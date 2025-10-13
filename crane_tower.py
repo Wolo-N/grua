@@ -304,13 +304,13 @@ def create_tower_crane_connectivity(ground_base_nodes, tower_left_nodes, tower_r
     # Adjust these lists to control number of cables:
     # More cables = more support but more complex
     # Fewer cables = simpler but less support
-    jib_cable_points = [-1]  # Only cable to tip: [-1]
+    jib_cable_points = [len(jib_top_nodes)//2, -1]  # Only cable to tip: [-1]
                               # Two cables: [len(jib_top_nodes)//2, -1]
                               # Three cables: [len(jib_top_nodes)//3, 2*len(jib_top_nodes)//3, -1]
 
     for cable_idx in jib_cable_points:
-        elements.append([tower_top_left, jib_top_nodes[cable_idx]])
         elements.append([tower_top_right, jib_top_nodes[cable_idx]])
+
 
     # SUPPORT CABLES from tower top to counterweight arm
     counterwt_cable_points = [-1]  # Only cable to tip: [-1]
@@ -318,7 +318,6 @@ def create_tower_crane_connectivity(ground_base_nodes, tower_left_nodes, tower_r
 
     for cable_idx in counterwt_cable_points:
         elements.append([tower_top_left, counterwt_top_nodes[cable_idx]])
-        elements.append([tower_top_right, counterwt_top_nodes[cable_idx]])
 
     # JIB top chord
     for i in range(len(jib_top_nodes) - 1):
@@ -403,12 +402,12 @@ def tower_crane_simulation():
 
     # Load at jib tip (crane lifting load)
     # In a real crane, the load hangs from the bottom chord (trolley with hook)
-    jib_load = 10000  # N (100 kN)
+    jib_load = 1000000  # N (100 kN)
     loads[jib_bot_nodes[-1], 1] = -jib_load  # Load hangs from bottom chord only
 
     # Counterweight (simulates heavy concrete blocks)
     # Counterweight sits on top of the counterweight arm platform
-    counterweight = 150000  # N (150 kN) - balances the jib load
+    counterweight = 0  # N (150 kN) - balances the jib load
     loads[counterwt_bot_nodes[-1], 1] = -counterweight  # Weight on bottom chord
 
     # Self-weight approximation
