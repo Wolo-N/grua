@@ -107,7 +107,23 @@ def plot_stress_heatmap(X, C, stresses, element_areas, title="Stress Distributio
 
     # Normalize stress values for colormap
     stress_mpa = stresses / 1e6  # Convert to MPa
-    norm = Normalize(vmin=np.min(stress_mpa), vmax=np.max(stress_mpa))
+
+    # Filter out nan/inf values for normalization
+    valid_stress = stress_mpa[np.isfinite(stress_mpa)]
+
+    if len(valid_stress) == 0:
+        print("Warning: No valid stress values to plot")
+        return
+
+    # Use symmetric scale centered at zero for better visualization
+    # Option 1: Use max absolute value for symmetric scale
+    max_abs_stress = np.max(np.abs(valid_stress))
+
+    # Option 2: Use percentiles to avoid extreme outliers (uncomment to use)
+    # percentile = 95
+    # max_abs_stress = np.percentile(np.abs(valid_stress), percentile)
+
+    norm = Normalize(vmin=-max_abs_stress, vmax=max_abs_stress)
 
     # Create colormap (blue for compression, red for tension)
     cmap = cm.RdBu_r  # Reversed so red is tension, blue is compression
@@ -139,13 +155,14 @@ def plot_stress_heatmap(X, C, stresses, element_areas, title="Stress Distributio
     plt.tight_layout()
     plt.show()
 
-    # Print stress statistics
+    # Print stress statistics (using valid stresses only)
     print("\n" + "="*60)
     print("STRESS ANALYSIS SUMMARY")
     print("="*60)
-    print(f"Maximum Tensile Stress:     {np.max(stress_mpa):8.2f} MPa")
-    print(f"Maximum Compressive Stress: {np.min(stress_mpa):8.2f} MPa")
-    print(f"Average Stress Magnitude:   {np.mean(np.abs(stress_mpa)):8.2f} MPa")
+    print(f"Maximum Tensile Stress:     {np.max(valid_stress):8.2f} MPa")
+    print(f"Maximum Compressive Stress: {np.min(valid_stress):8.2f} MPa")
+    print(f"Average Stress Magnitude:   {np.mean(np.abs(valid_stress)):8.2f} MPa")
+    print(f"Color scale range:          ±{max_abs_stress:.2f} MPa")
     print("="*60)
 
 def design_tower_crane_geometry():
@@ -174,15 +191,15 @@ def design_tower_crane_geometry():
     tower_height = 40.0      # m - vertical mast height
     jib_length = 30.0        # m - main boom length
     counterwt_length = 10.0  # m - counterweight arm length
-    truss_depth = 3.0        # m - depth of horizontal trusses
-    crane_drop = 8.0         # m - how far below tower top the crane arms sit
+    truss_depth = 1.0        # m - depth of horizontal trusses
+    crane_drop = 5.0         # m - how far below tower top the crane arms sit
 
     n_tower_segments = 8     # Number of segments in tower
     n_jib_segments = 10      # Number of segments in jib
     n_counterwt_segments = 4 # Number of segments in counterweight arm
 
     # Tower base width for stability
-    base_width = 4.0  # m
+    base_width = 2.0  # m
 
     node_list = []
     node_idx = 0
@@ -190,12 +207,10 @@ def design_tower_crane_geometry():
     # Ground base nodes (4 corners for stability)
     ground_base_nodes = []
     base_positions = [
-        [-base_width/2, 0],
-        [base_width/2, 0],
         [base_width/2, 0],
         [-base_width/2, 0]
     ]
-    for pos in base_positions[:2]:  # Only use 2 for simplicity
+    for pos in base_positions:  # Only use 2 for simplicity
         node_list.append(pos)
         ground_base_nodes.append(node_idx)
         node_idx += 1
@@ -289,16 +304,22 @@ def create_tower_crane_connectivity(ground_base_nodes, tower_left_nodes, tower_r
     tower_top_left = tower_left_nodes[-1]
     tower_top_right = tower_right_nodes[-1]
 
-    # Connect tower to crane arms at base (near tower)
-    elements.append([tower_top_left, jib_bot_nodes[0]])
-    elements.append([tower_top_right, jib_bot_nodes[0]])
-    elements.append([tower_top_left, jib_top_nodes[0]])
-    elements.append([tower_top_right, jib_top_nodes[0]])
+    # Rigidly connect horizontal arms to tower at crane height level
+    # Find tower node closest to crane height (32m with 8 segments means node at 30m or 35m)
+    # With 8 segments from 0-40m, we have nodes at: 0, 5, 10, 15, 20, 25, 30, 35, 40m
+    # Crane arms are at 32m, so connect to tower nodes around that height
+    tower_connection_idx = len(tower_left_nodes) - 2  # Second from top (35m)
 
-    elements.append([tower_top_left, counterwt_bot_nodes[0]])
-    elements.append([tower_top_right, counterwt_bot_nodes[0]])
-    elements.append([tower_top_left, counterwt_top_nodes[0]])
-    elements.append([tower_top_right, counterwt_top_nodes[0]])
+    # Connect horizontal arm center to tower at crane height
+    elements.append([tower_left_nodes[tower_connection_idx], jib_bot_nodes[0]])
+    elements.append([tower_right_nodes[tower_connection_idx], jib_bot_nodes[0]])
+    elements.append([tower_left_nodes[tower_connection_idx], jib_top_nodes[0]])
+    elements.append([tower_right_nodes[tower_connection_idx], jib_top_nodes[0]])
+
+    elements.append([tower_left_nodes[tower_connection_idx], counterwt_bot_nodes[0]])
+    elements.append([tower_right_nodes[tower_connection_idx], counterwt_bot_nodes[0]])
+    elements.append([tower_left_nodes[tower_connection_idx], counterwt_top_nodes[0]])
+    elements.append([tower_right_nodes[tower_connection_idx], counterwt_top_nodes[0]])
 
     # SUPPORT CABLES from tower top to jib (multiple points for support)
     # Adjust these lists to control number of cables:
@@ -391,28 +412,31 @@ def tower_crane_simulation():
     A_secondary = 0.005  # Secondary/bracing members (m²)
     A_cable = 0.003  # Support cables - smaller cross-section (m²)
 
-    # Boundary conditions - fix ground base nodes
+    # Boundary conditions - fix ground base nodes and tower base nodes
     n_nodes = X.shape[0]
     bc = np.full((n_nodes, 2), False)
     for node in ground_base_nodes:
         bc[node, :] = True  # Fixed support at ground
+    # Also fix the tower base nodes (first node of each tower side)
+    bc[tower_left_nodes[0], :] = True  # Fix tower left base
+    bc[tower_right_nodes[0], :] = True  # Fix tower right base
 
     # Loads
     loads = np.zeros([n_nodes, 2], float)
 
     # Load at jib tip (crane lifting load)
     # In a real crane, the load hangs from the bottom chord (trolley with hook)
-    jib_load = 1000000  # N (100 kN)
+    jib_load = 2000  # N (100 kN)
     loads[jib_bot_nodes[-1], 1] = -jib_load  # Load hangs from bottom chord only
 
     # Counterweight (simulates heavy concrete blocks)
     # Counterweight sits on top of the counterweight arm platform
-    counterweight = 0  # N (150 kN) - balances the jib load
+    counterweight = 150000  # N (150 kN) - balances the jib load
     loads[counterwt_bot_nodes[-1], 1] = -counterweight  # Weight on bottom chord
 
     # Self-weight approximation
     for node in jib_top_nodes + jib_bot_nodes:
-        loads[node, 1] -= 500  # Jib self-weight
+        loads[node, 1] -= 2000  # Jib self-weight
     for node in counterwt_top_nodes + counterwt_bot_nodes:
         loads[node, 1] -= 500  # Counterweight arm self-weight
     for node in tower_left_nodes + tower_right_nodes:
@@ -479,12 +503,6 @@ def tower_crane_simulation():
     if np.max(np.abs(D)) > 100:
         print("\n⚠ WARNING: Displacements are extremely large!")
         print("This might indicate a structural instability or calculation error.")
-
-    # Plot deformed shape
-    scale_factor = 50
-    plot_truss(X + D * scale_factor, C,
-              f"Tower Crane - Deformed Shape (Scale: {scale_factor}x)",
-              show_nodes=False)
 
     # Calculate member forces and stresses
     print("\n" + "="*70)
@@ -557,9 +575,11 @@ def tower_crane_simulation():
         print("\n✗ WARNING: Structure may be OVERSTRESSED")
         print("  Recommendation: Increase member sizes or reduce loads")
 
-    # Plot stress heatmap
-    plot_stress_heatmap(X, C, element_stresses, element_areas,
-                       title="Tower Crane Stress Distribution - With Counterweight")
+    # Plot stress heatmap on deformed shape
+    scale_factor = 50
+    X_deformed = X + D * scale_factor
+    plot_stress_heatmap(X_deformed, C, element_stresses, element_areas,
+                       title=f"Tower Crane Stress Distribution - Deformed Shape (Scale: {scale_factor}x)")
 
     print("\n" + "="*70)
 
