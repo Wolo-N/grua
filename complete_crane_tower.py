@@ -24,6 +24,8 @@ def element_stiffness(n1, n2, A, E):
     k_structural : ndarray (4x4)
         Element stiffness matrix in global coordinates
         DOF order: [u1, v1, u2, v2] where u=x-displacement, v=y-displacement
+    L : float
+        Element length (m)
     '''
     # Calculate element vector and length
     d = n2 - n1  # Element vector from node 1 to node 2
@@ -31,7 +33,7 @@ def element_stiffness(n1, n2, A, E):
 
     # Check for zero-length elements to avoid division by zero
     if L < 1e-10:
-        return np.zeros((4, 4), dtype=float)
+        return np.zeros((4, 4), dtype=float), 0.0
 
     # Direction cosines (unit vector components)
     c = d[0] / L  # cos(θ) - x-direction cosine
@@ -50,11 +52,96 @@ def element_stiffness(n1, n2, A, E):
     # Transform stiffness matrix to global coordinates: K_global = T^T * K_local * T
     k_structural = np.matmul(T.T, np.matmul(k_local, T))
 
-    return k_structural
+    return k_structural, L
+
+def tubular_section_properties(D_outer, thickness):
+    '''
+    Calculate properties of tubular cross-section
+
+    Parameters:
+    -----------
+    D_outer : float
+        Outer diameter (m)
+    thickness : float
+        Wall thickness (m)
+
+    Returns:
+    --------
+    A : float
+        Cross-sectional area (m²)
+    I : float
+        Second moment of area (m⁴)
+    '''
+    D_inner = D_outer - 2 * thickness
+    A = np.pi / 4 * (D_outer**2 - D_inner**2)
+    I = np.pi / 64 * (D_outer**4 - D_inner**4)
+    return A, I
+
+def euler_buckling_load(E, I, L, end_conditions='pinned-pinned'):
+    '''
+    Calculate Euler critical buckling load
+
+    Parameters:
+    -----------
+    E : float
+        Young's modulus (Pa)
+    I : float
+        Second moment of area (m⁴)
+    L : float
+        Element length (m)
+    end_conditions : str
+        Boundary conditions ('pinned-pinned', 'fixed-free', 'fixed-fixed', 'fixed-pinned')
+
+    Returns:
+    --------
+    P_cr : float
+        Critical buckling load (N)
+    '''
+    # Effective length factors
+    K_factors = {
+        'pinned-pinned': 1.0,
+        'fixed-free': 2.0,
+        'fixed-fixed': 0.5,
+        'fixed-pinned': 0.7
+    }
+
+    K = K_factors.get(end_conditions, 1.0)
+    L_eff = K * L
+
+    if L_eff < 1e-10:
+        return np.inf
+
+    P_cr = (np.pi**2 * E * I) / (L_eff**2)
+    return P_cr
 
 def dof_el(nnod1, nnod2):
     '''Returns Elemental DOF for Assembly'''
     return [2*(nnod1+1)-2,2*(nnod1+1)-1,2*(nnod2+1)-2,2*(nnod2+1)-1]
+
+def calculate_cost(mass, n_elements, n_nodes, m0=1000, nelementos0=50, nuniones0=30):
+    '''
+    Calculate cost function according to TP2 specification
+
+    C(m, n_elementos, n_uniones) = m/m0 + 1.5*(n_elementos/nelementos0) + 2*(n_uniones/nuniones0)
+
+    Parameters:
+    -----------
+    mass : float
+        Total mass of structure (kg)
+    n_elements : int
+        Number of elements
+    n_nodes : int
+        Number of nodes (unions)
+    m0, nelementos0, nuniones0 : float
+        Normalization factors
+
+    Returns:
+    --------
+    cost : float
+        Normalized cost function value
+    '''
+    cost = (mass / m0) + 1.5 * (n_elements / nelementos0) + 2 * (n_nodes / nuniones0)
+    return cost
 
 def plot_truss(X, C, title="Truss Structure", scale_factor=1, show_nodes=True):
     '''Plot truss structure with optional node numbering'''
@@ -78,6 +165,122 @@ def plot_truss(X, C, title="Truss Structure", scale_factor=1, show_nodes=True):
     plt.title(title)
     plt.grid(True, alpha=0.3)
     plt.axis('equal')
+    plt.show()
+
+def plot_tension_heatmap(X, C, stresses, title="Tension Stress Distribution"):
+    '''Plot truss structure with tension stress heatmap (only positive stresses)'''
+    fig, ax = plt.subplots(figsize=(16, 12))
+
+    segments = []
+    tension_stresses = []
+    for iEl in range(C.shape[0]):
+        n1, n2 = C[iEl]
+        segments.append([(X[n1, 0], X[n1, 1]), (X[n2, 0], X[n2, 1])])
+        tension_stresses.append(max(0, stresses[iEl]))
+
+    tension_stresses = np.array(tension_stresses)
+    tension_mpa = tension_stresses / 1e6
+    max_tension = np.max(tension_mpa)
+
+    if max_tension > 0:
+        norm = Normalize(vmin=0, vmax=max_tension)
+        cmap = cm.Reds
+    else:
+        norm = Normalize(vmin=0, vmax=1)
+        cmap = cm.Reds
+
+    lc = LineCollection(segments, cmap=cmap, norm=norm, linewidths=4)
+    lc.set_array(tension_mpa)
+    line = ax.add_collection(lc)
+
+    cbar = fig.colorbar(line, ax=ax, pad=0.02)
+    cbar.set_label('Tension Stress (MPa)', rotation=270, labelpad=25)
+
+    ax.scatter(X[:, 0], X[:, 1], c='black', s=30, zorder=5, alpha=0.5)
+    ax.set_xlabel('x (m)', fontsize=12)
+    ax.set_ylabel('y (m)', fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect('equal')
+    ax.autoscale()
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_compression_heatmap(X, C, stresses, title="Compression Stress Distribution"):
+    '''Plot truss structure with compression stress heatmap (only negative stresses)'''
+    fig, ax = plt.subplots(figsize=(16, 12))
+
+    segments = []
+    compression_stresses = []
+    for iEl in range(C.shape[0]):
+        n1, n2 = C[iEl]
+        segments.append([(X[n1, 0], X[n1, 1]), (X[n2, 0], X[n2, 1])])
+        compression_stresses.append(abs(min(0, stresses[iEl])))
+
+    compression_stresses = np.array(compression_stresses)
+    compression_mpa = compression_stresses / 1e6
+    max_compression = np.max(compression_mpa)
+
+    if max_compression > 0:
+        norm = Normalize(vmin=0, vmax=max_compression)
+        cmap = cm.Blues
+    else:
+        norm = Normalize(vmin=0, vmax=1)
+        cmap = cm.Blues
+
+    lc = LineCollection(segments, cmap=cmap, norm=norm, linewidths=4)
+    lc.set_array(compression_mpa)
+    line = ax.add_collection(lc)
+
+    cbar = fig.colorbar(line, ax=ax, pad=0.02)
+    cbar.set_label('Compression Stress (MPa)', rotation=270, labelpad=25)
+
+    ax.scatter(X[:, 0], X[:, 1], c='black', s=30, zorder=5, alpha=0.5)
+    ax.set_xlabel('x (m)', fontsize=12)
+    ax.set_ylabel('y (m)', fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect('equal')
+    ax.autoscale()
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_deformation_heatmap(X, C, D, title="Deformation Magnitude Distribution"):
+    '''Plot truss structure with deformation magnitude heatmap'''
+    fig, ax = plt.subplots(figsize=(16, 12))
+
+    segments = []
+    deformations = []
+    for iEl in range(C.shape[0]):
+        n1, n2 = C[iEl]
+        segments.append([(X[n1, 0], X[n1, 1]), (X[n2, 0], X[n2, 1])])
+        avg_def = (np.linalg.norm(D[n1]) + np.linalg.norm(D[n2])) / 2
+        deformations.append(avg_def)
+
+    deformations = np.array(deformations)
+    deformation_mm = deformations * 1000
+    norm = Normalize(vmin=0, vmax=np.max(deformation_mm))
+
+    cmap = cm.YlOrRd
+
+    lc = LineCollection(segments, cmap=cmap, norm=norm, linewidths=4)
+    lc.set_array(deformation_mm)
+    line = ax.add_collection(lc)
+
+    cbar = fig.colorbar(line, ax=ax, pad=0.02)
+    cbar.set_label('Deformation Magnitude (mm)', rotation=270, labelpad=25)
+
+    ax.scatter(X[:, 0], X[:, 1], c='black', s=30, zorder=5, alpha=0.5)
+    ax.set_xlabel('x (m)', fontsize=12)
+    ax.set_ylabel('y (m)', fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect('equal')
+    ax.autoscale()
+
+    plt.tight_layout()
     plt.show()
 
 def plot_stress_heatmap(X, C, stresses, element_areas, title="Stress Distribution Heatmap"):
@@ -405,12 +608,23 @@ def tower_crane_simulation():
     # Plot original structure
     plot_truss(X, C, "Tower Crane with Counterweight - Original Structure", show_nodes=True)
 
-    # Material and section properties
-    E = 200e9  # Steel Young's modulus (Pa)
-    A_tower = 0.02  # Tower members - larger cross-section (m²)
-    A_main = 0.01  # Main structural members (m²)
-    A_secondary = 0.005  # Secondary/bracing members (m²)
-    A_cable = 0.003  # Support cables - smaller cross-section (m²)
+    # Material and section properties - TP2 SPECIFICATIONS
+    E = 200e9  # Steel Young's modulus (Pa) - TP2: 200 GPa
+    rho = 7800  # Steel density (kg/m³) - TP2: 7800 kg/m³
+    sigma_adm = 250e6  # Admissible stress (Pa) - TP2: 250 MPa
+
+    # Tubular sections - TP2: D_external_max = 50mm
+    D_outer_tower = 0.050  # 50mm outer diameter for tower
+    D_outer_main = 0.040   # 40mm outer diameter for main members
+    D_outer_secondary = 0.030  # 30mm outer diameter for secondary members
+    D_outer_cable = 0.020  # 20mm outer diameter for cables
+    thickness = 0.005  # 5mm wall thickness
+
+    # Calculate cross-sectional areas and moments of inertia
+    A_tower, I_tower = tubular_section_properties(D_outer_tower, thickness)
+    A_main, I_main = tubular_section_properties(D_outer_main, thickness)
+    A_secondary, I_secondary = tubular_section_properties(D_outer_secondary, thickness)
+    A_cable, I_cable = tubular_section_properties(D_outer_cable, thickness)
 
     # Boundary conditions - fix ground base nodes and tower base nodes
     n_nodes = X.shape[0]
@@ -434,26 +648,21 @@ def tower_crane_simulation():
     counterweight = 150000  # N (150 kN) - balances the jib load
     loads[counterwt_bot_nodes[-1], 1] = -counterweight  # Weight on bottom chord
 
-    # Self-weight approximation
-    for node in jib_top_nodes + jib_bot_nodes:
-        loads[node, 1] -= 2000  # Jib self-weight
-    for node in counterwt_top_nodes + counterwt_bot_nodes:
-        loads[node, 1] -= 500  # Counterweight arm self-weight
-    for node in tower_left_nodes + tower_right_nodes:
-        loads[node, 1] -= 800  # Tower self-weight
+    # Self-weight will be calculated during assembly based on element properties
 
     print(f"\nApplied jib load: {jib_load/1000:.0f} kN")
     print(f"Counterweight: {counterweight/1000:.0f} kN")
 
     # Prepare for FE analysis
     bc_mask = bc.reshape(1, 2*n_nodes).ravel()
-    load_vector = loads.reshape(1, 2*n_nodes).ravel()[~bc_mask]
 
-    # Assembly global stiffness matrix
+    # Assembly global stiffness matrix and calculate self-weight
     k_global = np.zeros([2*n_nodes, 2*n_nodes], float)
 
     n_tower_elements = len(tower_left_nodes) - 1
     element_type_list = []
+    element_lengths = np.zeros(C.shape[0])
+    element_masses = np.zeros(C.shape[0])
 
     # Get tower top nodes for cable identification
     tower_top_left = tower_left_nodes[-1]
@@ -484,8 +693,27 @@ def tower_crane_simulation():
             element_type_list.append('secondary')
 
         dof = dof_el(C[iEl,0], C[iEl,1])
-        k_elemental = element_stiffness(X[C[iEl,0],:], X[C[iEl,1],:], A, E)
+        k_elemental, L = element_stiffness(X[C[iEl,0],:], X[C[iEl,1],:], A, E)
         k_global[np.ix_(dof, dof)] += k_elemental
+
+        # Store element length and calculate mass
+        element_lengths[iEl] = L
+        element_masses[iEl] = A * L * rho  # mass = volume * density
+
+    # Add self-weight to loads (distribute element mass to nodes)
+    for iEl in range(C.shape[0]):
+        n1, n2 = C[iEl]
+        element_weight = element_masses[iEl] * 9.81  # Weight in N
+        # Distribute half to each node
+        loads[n1, 1] -= element_weight / 2
+        loads[n2, 1] -= element_weight / 2
+
+    # Total structure mass
+    total_mass = np.sum(element_masses)
+    print(f"Total structure mass: {total_mass:.2f} kg")
+
+    # Now update load vector with self-weight included
+    load_vector = loads.reshape(1, 2*n_nodes).ravel()[~bc_mask]
 
     # Solve system
     k_reduced = k_global[~bc_mask][:, ~bc_mask]
@@ -532,12 +760,11 @@ def tower_crane_simulation():
         element_areas.append(A)
 
         # Calculate element force
-        k_el = element_stiffness(X[n1], X[n2], A, E)
+        k_el, L = element_stiffness(X[n1], X[n2], A, E)
         f_el = k_el @ d_el
 
         # Calculate axial force
         d_vec = X[n2] - X[n1]
-        L = np.linalg.norm(d_vec)
         e = d_vec / L
         axial_force = -np.dot([f_el[2] - f_el[0], f_el[3] - f_el[1]], e)
 
@@ -555,31 +782,87 @@ def tower_crane_simulation():
     print(f"\nMaximum Tension:     {max_tension/1000:8.1f} kN")
     print(f"Maximum Compression: {max_compression/1000:8.1f} kN")
 
-    # Safety analysis
-    yield_strength = 250e6  # Pa (typical steel)
-    safety_factor = 2.5
-
-    max_stress_tension = max_tension / A_tower
-    max_stress_compression = abs(max_compression) / A_tower
-
+    # Safety analysis - TP2 Requirements: FS > 2
     print(f"\n" + "="*70)
-    print("STRUCTURAL SAFETY ANALYSIS")
+    print("STRUCTURAL SAFETY ANALYSIS - TP2")
     print("="*70)
-    print(f"Max tensile stress:     {max_stress_tension/1e6:.1f} MPa")
-    print(f"Max compressive stress: {max_stress_compression/1e6:.1f} MPa")
-    print(f"Allowable stress:       {yield_strength/safety_factor/1e6:.1f} MPa")
 
-    if max_stress_tension < yield_strength/safety_factor and max_stress_compression < yield_strength/safety_factor:
-        print("\n✓ Structure is SAFE under applied loads")
+    # Calculate safety factors for all elements
+    tension_safety_factors = np.zeros(C.shape[0])
+    buckling_safety_factors = np.zeros(C.shape[0])
+
+    for iEl in range(C.shape[0]):
+        stress = element_stresses[iEl]
+        force = element_forces[iEl]
+        L = element_lengths[iEl]
+
+        # Determine element type to get correct I value
+        element_type = element_type_list[iEl]
+        if element_type == 'tower':
+            I = I_tower
+            A_elem = A_tower
+        elif element_type == 'main':
+            I = I_main
+            A_elem = A_main
+        elif element_type == 'cable':
+            I = I_cable
+            A_elem = A_cable
+        else:
+            I = I_secondary
+            A_elem = A_secondary
+
+        # Tension safety factor: FS_tension = sigma_adm / sigma_max
+        if stress > 0:  # Tension
+            tension_safety_factors[iEl] = sigma_adm / stress
+        else:  # Compression (also check against sigma_adm)
+            tension_safety_factors[iEl] = sigma_adm / abs(stress)
+
+        # Buckling safety factor: FS_buckling = P_critical / P_max (only for compression)
+        if force < 0:  # Compression
+            P_cr = euler_buckling_load(E, I, L, end_conditions='pinned-pinned')
+            buckling_safety_factors[iEl] = P_cr / abs(force)
+        else:
+            buckling_safety_factors[iEl] = np.inf  # No buckling in tension
+
+    # Find minimum safety factors
+    min_tension_sf = np.min(tension_safety_factors)
+    min_buckling_sf = np.min(buckling_safety_factors[buckling_safety_factors < np.inf])
+    min_overall_sf = min(min_tension_sf, min_buckling_sf)
+
+    print(f"Admissible stress (σ_adm):     {sigma_adm/1e6:.1f} MPa")
+    print(f"Max tensile stress:            {np.max(element_stresses)/1e6:.1f} MPa")
+    print(f"Max compressive stress:        {abs(np.min(element_stresses))/1e6:.1f} MPa")
+    print(f"\nSafety Factors:")
+    print(f"  Minimum tension SF:          {min_tension_sf:.2f}")
+    print(f"  Minimum buckling SF:         {min_buckling_sf:.2f}")
+    print(f"  Minimum overall SF:          {min_overall_sf:.2f}")
+    print(f"  Required SF (TP2):           2.00")
+
+    if min_overall_sf >= 2.0:
+        print("\n✓ Structure PASSES safety requirements (FS > 2)")
     else:
-        print("\n✗ WARNING: Structure may be OVERSTRESSED")
+        print("\n✗ WARNING: Structure FAILS safety requirements (FS < 2)")
         print("  Recommendation: Increase member sizes or reduce loads")
+
+    # Calculate cost function
+    cost = calculate_cost(total_mass, C.shape[0], X.shape[0])
+    print(f"\nCost Function (TP2):")
+    print(f"  C = {cost:.3f}")
 
     # Plot stress heatmap on deformed shape
     scale_factor = 50
     X_deformed = X + D * scale_factor
     plot_stress_heatmap(X_deformed, C, element_stresses, element_areas,
                        title=f"Tower Crane Stress Distribution - Deformed Shape (Scale: {scale_factor}x)")
+
+    # Plot separate tension, compression, and deformation heatmaps
+    print("\nGenerating detailed stress and deformation visualizations...")
+    plot_tension_heatmap(X, C, element_stresses,
+                        title="Tower Crane - Tension Stress Distribution")
+    plot_compression_heatmap(X, C, element_stresses,
+                            title="Tower Crane - Compression Stress Distribution")
+    plot_deformation_heatmap(X, C, D,
+                            title="Tower Crane - Deformation Magnitude Distribution")
 
     print("\n" + "="*70)
 
