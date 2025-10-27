@@ -675,7 +675,7 @@ def main():
 
     # Loads
     counterweight_mass = 15000  # kg (TP2: 15000 kg counterweight)
-    max_load = 50000  # N (example working load)
+    max_load = 20000  # N (example working load)
 
     print(f"\nGeometry:")
     print(f"  Tower height: {tower_height} m")
