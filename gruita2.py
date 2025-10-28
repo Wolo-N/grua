@@ -58,6 +58,35 @@ def dof_el(nnod1, nnod2):
     '''Returns Elemental DOF for Assembly'''
     return [2*(nnod1+1)-2,2*(nnod1+1)-1,2*(nnod2+1)-2,2*(nnod2+1)-1]
 
+def hollow_circular_section(d_outer, d_inner):
+    '''
+    Calculate cross-sectional area and moment of inertia for hollow circular section
+
+    Parameters:
+    -----------
+    d_outer : float
+        Outer diameter (m)
+    d_inner : float
+        Inner diameter (m)
+
+    Returns:
+    --------
+    A : float
+        Cross-sectional area (m²)
+    I : float
+        Second moment of area (m⁴)
+    '''
+    r_outer = d_outer / 2
+    r_inner = d_inner / 2
+
+    # Cross-sectional area: A = π(r_outer² - r_inner²)
+    A = np.pi * (r_outer**2 - r_inner**2)
+
+    # Second moment of area: I = π/4 * (r_outer⁴ - r_inner⁴)
+    I = np.pi / 4 * (r_outer**4 - r_inner**4)
+
+    return A, I
+
 def plot_truss(X, C, title="Truss Structure", scale_factor=1, show_nodes=True):
     '''Plot truss structure with optional node numbering'''
     plt.figure(figsize=(15, 8))
@@ -196,28 +225,33 @@ def create_crane_connectivity(tower_base, boom_top_nodes, boom_bot_nodes):
 
     elements = []
 
-    # Boom top chord elements (all top nodes form a continuous chord)
+    # STRUTS (compression members - rigid structural elements)
+
+    # Top strut elements (horizontal top members)
     for i in range(len(boom_top_nodes) - 1):
         elements.append([boom_top_nodes[i], boom_top_nodes[i+1]])
 
-    # Boom bottom chord elements (all bottom nodes)
+    # Bottom strut elements (horizontal bottom members)
     for i in range(len(boom_bot_nodes) - 1):
         elements.append([boom_bot_nodes[i], boom_bot_nodes[i+1]])
 
-    # Boom vertical members (connect each top node to corresponding bottom node)
+    # Vertical struts (connect each top node to corresponding bottom node)
     # Both arrays have the same length, so direct 1-to-1 mapping
     for i in range(len(boom_top_nodes)):
         elements.append([boom_top_nodes[i], boom_bot_nodes[i]])
 
-    # Diagonal members (alternating pattern throughout)
+    # CABLES (tension members - flexible cables)
+
+    # Diagonal cables (alternating pattern throughout)
     for i in range(len(boom_top_nodes) - 1):
         if i % 2 == 0:  # Even indices: bottom-left to top-right
             elements.append([boom_bot_nodes[i], boom_top_nodes[i+1]])
         else:  # Odd indices: top-left to bottom-right
             elements.append([boom_top_nodes[i], boom_bot_nodes[i+1]])
 
-    # Support cable from tower (node 0) to rightmost top node
+    # Support cables from tower (node 0) to boom
     elements.append([tower_base, boom_top_nodes[-2]])
+    elements.append([tower_base, boom_top_nodes[-8]])  # Second cable for stability
 
     return np.array(elements, dtype=int)
 
@@ -248,8 +282,21 @@ def crane_simulation():
 
     # Material and section properties
     E = 200e9  # Steel Young's modulus (Pa)
-    A_main = 0.005  # Main structural members cross-sectional area (m�)
-    A_secondary = 0.005  # Secondary members cross-sectional area (m�)
+
+    # Hollow circular cross-section specifications (in meters)
+    # Struts (compression members: top/bottom/vertical)
+    d_outer_strut = 0.050  # 50 mm outer diameter (max allowed)
+    d_inner_strut = 0.040  # 40 mm inner diameter (5 mm wall thickness)
+    A_strut, I_strut = hollow_circular_section(d_outer_strut, d_inner_strut)
+
+    # Cables (tension members: diagonals/supports)
+    d_outer_cable = 0.050  # 25 mm outer diameter
+    d_inner_cable = 0.000  # 20 mm inner diameter (2.5 mm wall thickness)
+    A_cable, I_cable = hollow_circular_section(d_outer_cable, d_inner_cable)
+
+    print(f"\nCross-section properties:")
+    print(f"  Struts: D_outer={d_outer_strut*1000:.1f}mm, D_inner={d_inner_strut*1000:.1f}mm, A={A_strut*1e4:.2f}cm², I={I_strut*1e8:.2f}cm⁴")
+    print(f"  Cables: D_outer={d_outer_cable*1000:.1f}mm, D_inner={d_inner_cable*1000:.1f}mm, A={A_cable*1e4:.2f}cm², I={I_cable*1e8:.2f}cm⁴")
 
     # Boundary conditions
     n_nodes = X.shape[0]
@@ -269,9 +316,30 @@ def crane_simulation():
     tip_load = 5 # N (50 kN vertical load at tip)
     loads[boom_top_nodes[-1], 1] = -tip_load  # Vertical load at boom tip
 
-    # Self-weight (approximate)
-    for node in boom_top_nodes + boom_bot_nodes:
-        loads[node, 1] -= 300  # Approximate self-weight
+    # Calculate self-weight based on element mass: Weight = ρ × V × g
+    # Distribute each element's weight equally to its two nodes
+    rho_steel = 7850  # kg/m³ - density of steel
+    g = 9.81  # m/s² - gravitational acceleration
+
+    for iEl in range(C.shape[0]):
+        n1, n2 = C[iEl]
+
+        # Element length
+        L = np.linalg.norm(X[n2] - X[n1])
+
+        # Element cross-sectional area (struts vs cables)
+        # Struts: top + bottom + vertical = 2*(n-1) + n = 3n - 2
+        num_strut_elements = 3 * len(boom_top_nodes) - 2
+        A = A_strut if iEl < num_strut_elements else A_cable
+
+        # Calculate element weight
+        volume = A * L  # m³
+        mass = rho_steel * volume  # kg
+        weight = mass * g  # N
+
+        # Distribute weight equally to both nodes
+        loads[n1, 1] -= weight / 2
+        loads[n2, 1] -= weight / 2
 
     print(f"Applied {tip_load/1000:.0f} kN load at crane tip")
 
@@ -283,13 +351,13 @@ def crane_simulation():
     k_global = np.zeros([2*n_nodes, 2*n_nodes], float)
 
     for iEl in range(C.shape[0]):
-        # Use different cross-sections for different member types
-        # Main boom chords (top and bottom)
-        num_chord_elements = 2 * (len(boom_top_nodes) - 1)
-        if iEl < num_chord_elements:  # Main boom chords
-            A = A_main
-        else:  # Secondary elements (verticals, diagonals, cables)
-            A = A_secondary
+        # Use different cross-sections for struts vs cables
+        # Struts: top + bottom + vertical = 3n - 2
+        num_strut_elements = 3 * len(boom_top_nodes) - 2
+        if iEl < num_strut_elements:  # Struts (rigid compression members)
+            A = A_strut
+        else:  # Cables (tension members: diagonals + support cables)
+            A = A_cable
 
         dof = dof_el(C[iEl,0], C[iEl,1])
         k_elemental = element_stiffness(X[C[iEl,0],:], X[C[iEl,1],:], A, E)
@@ -327,13 +395,13 @@ def crane_simulation():
         d_el = np.concatenate([D[n1], D[n2]])
 
         # Element properties
-        num_chord_elements = 2 * (len(boom_top_nodes) - 1)
-        if iEl < num_chord_elements:  # Main boom chords
-            A = A_main
-            member_type = "Boom Chord"
-        else:  # Secondary elements (verticals, diagonals, cables)
-            A = A_secondary
-            member_type = "Secondary"
+        num_strut_elements = 3 * len(boom_top_nodes) - 2
+        if iEl < num_strut_elements:  # Struts (rigid compression members)
+            A = A_strut
+            member_type = "Strut"
+        else:  # Cables (tension members)
+            A = A_cable
+            member_type = "Cable"
 
         element_areas.append(A)
 
@@ -378,8 +446,8 @@ def crane_simulation():
     yield_strength = 250e6  # Pa (typical steel)
     safety_factor = 2.5
 
-    max_stress_tension = max_tension / A_main
-    max_stress_compression = abs(max_compression) / A_main
+    max_stress_tension = max_tension / A_strut
+    max_stress_compression = abs(max_compression) / A_strut
 
     print(f"\n=Structural Analysis Summary:")
     print("=" * 50)
@@ -548,24 +616,35 @@ def analyze_cost_and_security(X, C, element_stresses, element_forces, boom_top_n
     # Allowable stress (typical structural steel)
     sigma_adm = 100e6  # 100 MPa
 
-    # Estimate critical buckling load (simplified Euler buckling)
+    # Estimate critical buckling load (Euler buckling)
     # For the most critical compression member
     E = 200e9  # Steel Young's modulus
-    A_main = 0.01
-    I_min = A_main * (0.1)**2 / 12  # Simplified moment of inertia for square section
 
-    # Find longest compressed member
+    # Hollow circular cross-section specifications
+    d_outer_strut = 0.050  # 50 mm
+    d_inner_strut = 0.046  # 46 mm
+    A_strut, I_strut = hollow_circular_section(d_outer_strut, d_inner_strut)
+
+    d_outer_cable = 0.020  # 20 mm
+    d_inner_cable = 0.016  # 16 mm
+    A_cable, I_cable = hollow_circular_section(d_outer_cable, d_inner_cable)
+
+    # Find longest compressed member and its moment of inertia
     max_compressed_length = 0
+    I_critical = I_strut  # Default to strut inertia
     for iEl in range(C.shape[0]):
         if element_forces[iEl] < 0:  # Compression
             n1, n2 = C[iEl]
             L = np.linalg.norm(X[n2] - X[n1])
             if L > max_compressed_length:
                 max_compressed_length = L
+                # Determine if this is a strut or cable
+                num_strut_elements = 3 * len(boom_top_nodes) - 2
+                I_critical = I_strut if iEl < num_strut_elements else I_cable
 
     # Euler buckling load: P_cr = π²EI/L²
     if max_compressed_length > 0:
-        P_critica = (np.pi**2 * E * I_min) / (max_compressed_length**2)
+        P_critica = (np.pi**2 * E * I_critical) / (max_compressed_length**2)
     else:
         P_critica = None
 
@@ -619,8 +698,15 @@ def analyze_moving_load():
 
     # Material and section properties
     E = 200e9  # Steel Young's modulus (Pa)
-    A_main = 0.01  # Main structural members (m²)
-    A_secondary = 0.005  # Secondary members (m²)
+
+    # Hollow circular cross-section specifications (in meters)
+    d_outer_strut = 0.050  # 50 mm outer diameter
+    d_inner_strut = 0.046  # 46 mm inner diameter
+    A_strut, I_strut = hollow_circular_section(d_outer_strut, d_inner_strut)
+
+    d_outer_cable = 0.020  # 20 mm outer diameter
+    d_inner_cable = 0.016  # 16 mm inner diameter
+    A_cable, I_cable = hollow_circular_section(d_outer_cable, d_inner_cable)
 
     # Boundary conditions
     n_nodes = X.shape[0]
@@ -633,11 +719,11 @@ def analyze_moving_load():
     # Assembly global stiffness matrix (only once)
     k_global = np.zeros([2*n_nodes, 2*n_nodes], float)
     for iEl in range(C.shape[0]):
-        num_chord_elements = 2 * (len(boom_top_nodes) - 1)
-        if iEl < num_chord_elements:
-            A = A_main
+        num_strut_elements = 3 * len(boom_top_nodes) - 2
+        if iEl < num_strut_elements:
+            A = A_strut
         else:
-            A = A_secondary
+            A = A_cable
 
         dof = dof_el(C[iEl,0], C[iEl,1])
         k_elemental = element_stiffness(X[C[iEl,0],:], X[C[iEl,1],:], A, E)
@@ -666,9 +752,21 @@ def analyze_moving_load():
             loads = np.zeros([n_nodes, 2], float)
             loads[pos_node, 1] = -load_mag  # Vertical downward load
 
-            # Add self-weight
-            for node in boom_top_nodes + boom_bot_nodes:
-                loads[node, 1] -= 1000
+            # Calculate self-weight based on element mass: Weight = ρ × V × g
+            # Distribute each element's weight equally to its two nodes
+            rho_steel = 7850  # kg/m³ - density of steel
+            g = 9.81  # m/s² - gravitational acceleration
+
+            for iEl in range(C.shape[0]):
+                n1, n2 = C[iEl]
+                L = np.linalg.norm(X[n2] - X[n1])
+                num_strut_elements = 3 * len(boom_top_nodes) - 2
+                A = A_strut if iEl < num_strut_elements else A_cable
+                volume = A * L  # m³
+                mass = rho_steel * volume  # kg
+                weight = mass * g  # N
+                loads[n1, 1] -= weight / 2
+                loads[n2, 1] -= weight / 2
 
             load_vector = loads.reshape(1, 2*n_nodes).ravel()[~bc_mask]
 
@@ -686,11 +784,11 @@ def analyze_moving_load():
                 n1, n2 = C[iEl]
                 d_el = np.concatenate([D[n1], D[n2]])
 
-                num_chord_elements = 2 * (len(boom_top_nodes) - 1)
-                if iEl < num_chord_elements:
-                    A = A_main
+                num_strut_elements = 3 * len(boom_top_nodes) - 2
+                if iEl < num_strut_elements:
+                    A = A_strut
                 else:
-                    A = A_secondary
+                    A = A_cable
 
                 k_el = element_stiffness(X[n1], X[n2], A, E)
                 f_el = k_el @ d_el
@@ -810,8 +908,15 @@ def animate_moving_load(load_magnitude=30000, scale_factor=100, interval=200):
 
     # Material and section properties
     E = 200e9
-    A_main = 0.01
-    A_secondary = 0.005
+
+    # Hollow circular cross-section specifications (in meters)
+    d_outer_strut = 0.050  # 50 mm outer diameter
+    d_inner_strut = 0.046  # 46 mm inner diameter
+    A_strut, I_strut = hollow_circular_section(d_outer_strut, d_inner_strut)
+
+    d_outer_cable = 0.020  # 20 mm outer diameter
+    d_inner_cable = 0.016  # 16 mm inner diameter
+    A_cable, I_cable = hollow_circular_section(d_outer_cable, d_inner_cable)
 
     # Boundary conditions
     n_nodes = X.shape[0]
@@ -824,11 +929,11 @@ def animate_moving_load(load_magnitude=30000, scale_factor=100, interval=200):
     # Assembly global stiffness matrix
     k_global = np.zeros([2*n_nodes, 2*n_nodes], float)
     for iEl in range(C.shape[0]):
-        num_chord_elements = 2 * (len(boom_top_nodes) - 1)
-        if iEl < num_chord_elements:
-            A = A_main
+        num_strut_elements = 3 * len(boom_top_nodes) - 2
+        if iEl < num_strut_elements:
+            A = A_strut
         else:
-            A = A_secondary
+            A = A_cable
 
         dof = dof_el(C[iEl,0], C[iEl,1])
         k_elemental = element_stiffness(X[C[iEl,0],:], X[C[iEl,1],:], A, E)
@@ -860,8 +965,8 @@ def animate_moving_load(load_magnitude=30000, scale_factor=100, interval=200):
             L = np.linalg.norm(X[n2] - X[n1])
 
             # Element cross-section
-            num_chord_elements = 2 * (len(boom_top_nodes) - 1)
-            A = A_main if iEl < num_chord_elements else A_secondary
+            num_strut_elements = 3 * len(boom_top_nodes) - 2
+            A = A_strut if iEl < num_strut_elements else A_cable
 
             # Element volume and mass
             volume = A * L  # m³
@@ -880,7 +985,9 @@ def animate_moving_load(load_magnitude=30000, scale_factor=100, interval=200):
         D = displacements.reshape(n_nodes, 2)
 
         deformations.append(D)
-        max_deflections_list.append(np.max(np.abs(D)))
+        # Calculate deflection at crane tip (last top node)
+        tip_deflection = abs(D[boom_top_nodes[-1], 1])  # Vertical displacement at tip
+        max_deflections_list.append(tip_deflection)
 
     # Create animation
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10))
@@ -926,20 +1033,20 @@ def animate_moving_load(load_magnitude=30000, scale_factor=100, interval=200):
         ax1.set_xlabel('x (m)', fontsize=12)
         ax1.set_ylabel('y (m)', fontsize=12)
         ax1.set_title(f'Crane Deformation - Load at x = {X[pos_node, 0]:.2f} m (Scale: {scale_factor}x)\n'
-                     f'Load: {load_magnitude/1000:.1f} kN | Max Deflection: {max_deflections_list[frame]*1000:.2f} mm',
+                     f'Load: {load_magnitude/1000:.1f} kN | Tip Deflection: {max_deflections_list[frame]*1000:.2f} mm',
                      fontsize=14, fontweight='bold')
         ax1.grid(True, alpha=0.3)
         ax1.axis('equal')
         ax1.legend(loc='upper right')
 
-        # Plot 2: Deflection profile
+        # Plot 2: Tip deflection profile
         positions_x = X[boom_bot_nodes, 0]
         ax2.plot(positions_x, np.array(max_deflections_list) * 1000, 'b-o', linewidth=2, markersize=8)
         ax2.plot(X[pos_node, 0], max_deflections_list[frame] * 1000, 'ro', markersize=15)
         ax2.axvline(x=X[pos_node, 0], color='r', linestyle='--', alpha=0.5)
-        ax2.set_xlabel('Position along crane (m)', fontsize=12)
-        ax2.set_ylabel('Maximum deflection (mm)', fontsize=12)
-        ax2.set_title('Deflection Profile', fontsize=12, fontweight='bold')
+        ax2.set_xlabel('Load Position along crane (m)', fontsize=12)
+        ax2.set_ylabel('Tip Deflection (mm)', fontsize=12)
+        ax2.set_title('Tip Deflection vs Load Position', fontsize=12, fontweight='bold')
         ax2.grid(True, alpha=0.3)
 
         plt.tight_layout()
@@ -963,5 +1070,5 @@ if __name__ == "__main__":
     # Run moving load analysis
     analyze_moving_load()
 
-    # Run animated moving load visualization
-    animate_moving_load(load_magnitude=0, scale_factor=100, interval=200)
+    # # Run animated moving load visualization
+    # animate_moving_load(load_magnitude=0, scale_factor=100, interval=200)
