@@ -4,9 +4,12 @@ from scipy.optimize import differential_evolution, minimize
 from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 import matplotlib.cm as cm
+from matplotlib.animation import FuncAnimation
 import os
 from pathlib import Path
 from datetime import datetime
+import pickle
+import time
 
 '''
 GRUITA 3 - SELF-OPTIMIZING CRANE
@@ -24,6 +27,8 @@ Saves a graph for each iteration without displaying it.
 # Global variables for iteration tracking
 iteration_counter = 0
 best_objective = float('inf')
+best_design_vector = None  # Store the best design vector
+last_save_time = None  # Track when we last saved
 output_dir = None  # Will be set in optimize_crane() with timestamp
 
 def element_stiffness(n1, n2, A, E):
@@ -330,6 +335,68 @@ def save_iteration_graph(X, C, element_types, thickness_params, objective, itera
         plt.close('all')
         pass
 
+def save_intermediate_design(design_vector, objective, iteration_num):
+    '''
+    Save an intermediate crane design during optimization
+    This is called periodically (every N minutes) to avoid losing progress
+
+    Parameters:
+    -----------
+    design_vector : array
+        Complete design vector
+    objective : float
+        Objective value
+    iteration_num : int
+        Current iteration number
+    '''
+    global output_dir
+
+    try:
+        # Extract design parameters
+        n_segments = int(round(design_vector[0]))
+        boom_height = design_vector[1]
+        connectivity_pattern = design_vector[2:5]
+        taper_ratio = design_vector[5]
+
+        # Regenerate geometry
+        X, C, types, tower_base, boom_top_nodes, boom_bot_nodes = \
+            design_parametric_crane(n_segments, boom_height, connectivity_pattern, taper_ratio)
+
+        # Extract thickness parameters
+        n_elements = C.shape[0]
+        thickness_params = design_vector[6:6+n_elements*2]
+
+        # Package everything
+        crane_data = {
+            'design_vector': design_vector,
+            'n_segments': n_segments,
+            'boom_height': boom_height,
+            'connectivity_pattern': connectivity_pattern,
+            'taper_ratio': taper_ratio,
+            'X': X,
+            'C': C,
+            'element_types': types,
+            'tower_base': tower_base,
+            'boom_top_nodes': boom_top_nodes,
+            'boom_bot_nodes': boom_bot_nodes,
+            'thickness_params': thickness_params,
+            'objective': objective,
+            'iteration': iteration_num
+        }
+
+        # Save with timestamp in filename
+        timestamp = datetime.now().strftime("%H%M%S")
+        filepath = output_dir / f'checkpoint_iter{iteration_num:04d}_obj{objective:.2f}_{timestamp}.pkl'
+
+        with open(filepath, 'wb') as f:
+            pickle.dump(crane_data, f)
+
+        print(f"  [CHECKPOINT] Saved intermediate design to: {filepath.name}")
+
+    except Exception as e:
+        # Don't crash optimization if save fails
+        print(f"  [WARNING] Failed to save intermediate design: {e}")
+
 def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
     '''
     Evaluate a crane design and return cost with penalties for safety violations
@@ -551,7 +618,7 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
     objective = cost + penalty
 
     # Track iterations and save graphs ONLY for improving designs
-    global iteration_counter, best_objective
+    global iteration_counter, best_objective, best_design_vector, last_save_time
 
     iteration_counter += 1
 
@@ -568,7 +635,20 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
                            objective, iteration_counter, n_segments, boom_height)
 
         best_objective = objective
+        best_design_vector = design_vector.copy()  # Store the best design
         print(f"[Iter {iteration_counter}] NEW BEST! Objective: {objective:.2f} (Cost: {cost:.2f}, Penalty: {penalty:.2f})")
+
+        # Check if enough time has passed to save an intermediate checkpoint
+        current_time = time.time()
+        if last_save_time is None:
+            last_save_time = current_time
+
+        time_since_last_save = current_time - last_save_time
+        save_interval = 300  # Save every 5 minutes (300 seconds)
+
+        if time_since_last_save >= save_interval:
+            save_intermediate_design(design_vector, objective, iteration_counter)
+            last_save_time = current_time
 
     if verbose:
         print(f"Design: n_seg={n_segments}, h={boom_height:.2f}m, n_el={n_elements}, n_nodes={n_nodes}")
@@ -579,9 +659,16 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
 
     return objective
 
-def optimize_crane():
+def optimize_crane(maxiter=100, popsize=15):
     '''
     Main optimization routine
+
+    Parameters:
+    -----------
+    maxiter : int
+        Maximum number of iterations for differential evolution (default: 100)
+    popsize : int
+        Population size for differential evolution (default: 15)
     '''
     global output_dir, iteration_counter, best_objective
 
@@ -665,15 +752,17 @@ def optimize_crane():
     initial_obj = evaluate_crane_design(np.array(initial_guess), max_load=40000, verbose=True)
 
     # Use differential evolution for global optimization
-    print("\nStarting optimization with differential evolution...")
+    print(f"\nStarting optimization with differential evolution...")
+    print(f"  Max iterations: {maxiter}")
+    print(f"  Population size: {popsize}")
     result = differential_evolution(
         evaluate_crane_design,
         bounds,
         args=(40000, False),  # 40kN load, not verbose
         x0=np.array(initial_guess),
         strategy='best1bin',
-        maxiter=100,
-        popsize=15,
+        maxiter=maxiter,
+        popsize=popsize,
         tol=0.01,
         mutation=(0.5, 1.5),
         recombination=0.7,
@@ -799,5 +888,477 @@ def plot_optimized_crane(X, C, element_types, thickness_params,
     print(f"  Wall thickness: {min(wall_thickness):.1f} - {max(wall_thickness):.1f} mm")
     print("="*80)
 
+def save_best_crane(result, filename='best_crane.pkl'):
+    '''
+    Save the best crane design to a file for later testing
+
+    Parameters:
+    -----------
+    result : OptimizeResult
+        Result object from differential_evolution
+    filename : str
+        Name of file to save design to
+    '''
+    global output_dir
+
+    # Extract design parameters
+    n_segments_opt = int(round(result.x[0]))
+    boom_height_opt = result.x[1]
+    connectivity_pattern_opt = result.x[2:5]
+    taper_ratio_opt = result.x[5]
+
+    # Regenerate geometry
+    X_opt, C_opt, types_opt, tower_base, boom_top_nodes, boom_bot_nodes = \
+        design_parametric_crane(n_segments_opt, boom_height_opt, connectivity_pattern_opt, taper_ratio_opt)
+
+    # Extract thickness parameters
+    n_elements = C_opt.shape[0]
+    thickness_params = result.x[6:6+n_elements*2]
+
+    # Package everything
+    crane_data = {
+        'design_vector': result.x,
+        'n_segments': n_segments_opt,
+        'boom_height': boom_height_opt,
+        'connectivity_pattern': connectivity_pattern_opt,
+        'taper_ratio': taper_ratio_opt,
+        'X': X_opt,
+        'C': C_opt,
+        'element_types': types_opt,
+        'tower_base': tower_base,
+        'boom_top_nodes': boom_top_nodes,
+        'boom_bot_nodes': boom_bot_nodes,
+        'thickness_params': thickness_params,
+        'objective': result.fun
+    }
+
+    # Save to output directory
+    filepath = output_dir / filename
+    with open(filepath, 'wb') as f:
+        pickle.dump(crane_data, f)
+
+    print(f"\nBest crane design saved to: {filepath}")
+    return filepath
+
+def load_crane(filename='best_crane.pkl'):
+    '''
+    Load a saved crane design
+
+    Parameters:
+    -----------
+    filename : str or Path
+        Path to saved crane file
+
+    Returns:
+    --------
+    crane_data : dict
+        Dictionary containing all crane design data
+    '''
+    with open(filename, 'rb') as f:
+        crane_data = pickle.load(f)
+
+    print(f"Loaded crane design from: {filename}")
+    print(f"  Segments: {crane_data['n_segments']}")
+    print(f"  Elements: {crane_data['C'].shape[0]}")
+    print(f"  Nodes: {crane_data['X'].shape[0]}")
+    print(f"  Objective: {crane_data['objective']:.2f}")
+
+    return crane_data
+
+def analyze_moving_load(crane_data, load_magnitudes=None):
+    '''
+    Analyze crane performance with varying loads at different positions
+    Tests loads at different positions along the bottom chord
+
+    Parameters:
+    -----------
+    crane_data : dict
+        Crane design data from load_crane()
+    load_magnitudes : array-like, optional
+        Load magnitudes to test (default: 0 to 40000 N in 5 steps)
+    '''
+    print("\n" + "="*70)
+    print("MOVING LOAD ANALYSIS")
+    print("="*70)
+
+    # Extract crane data
+    X = crane_data['X']
+    C = crane_data['C']
+    tower_base = crane_data['tower_base']
+    boom_top_nodes = crane_data['boom_top_nodes']
+    boom_bot_nodes = crane_data['boom_bot_nodes']
+    thickness_params = crane_data['thickness_params']
+
+    # Material properties
+    E = 200e9
+    rho_steel = 7850
+    g = 9.81
+
+    # Build element areas from thickness parameters
+    element_areas = []
+    for iEl in range(C.shape[0]):
+        d_outer = thickness_params[2*iEl]
+        d_inner = thickness_params[2*iEl + 1]
+
+        # Ensure valid dimensions
+        min_wall = 0.002
+        if d_inner >= d_outer - min_wall:
+            d_inner = d_outer - min_wall
+        if d_inner < 0.001:
+            d_inner = 0.001
+
+        A, I = hollow_circular_section(d_outer, d_inner)
+        element_areas.append(A)
+
+    # Boundary conditions
+    n_nodes = X.shape[0]
+    bc = np.full((n_nodes, 2), False)
+    bc[boom_bot_nodes[0], :] = True
+    bc[tower_base, :] = True
+
+    bc_mask = bc.reshape(1, 2*n_nodes).ravel()
+
+    # Assembly global stiffness matrix
+    k_global = np.zeros([2*n_nodes, 2*n_nodes], float)
+    for iEl in range(C.shape[0]):
+        A = element_areas[iEl]
+        dof = dof_el(C[iEl,0], C[iEl,1])
+        k_elemental = element_stiffness(X[C[iEl,0],:], X[C[iEl,1],:], A, E)
+        k_global[np.ix_(dof, dof)] += k_elemental
+
+    k_reduced = k_global[~bc_mask][:, ~bc_mask]
+
+    # Test parameters
+    if load_magnitudes is None:
+        load_magnitudes = np.linspace(0, 40000, 5)
+    test_positions = boom_bot_nodes
+
+    # Storage for results
+    max_deflections = np.zeros((len(load_magnitudes), len(test_positions)))
+    max_stresses = np.zeros((len(load_magnitudes), len(test_positions)))
+    max_tensions = np.zeros((len(load_magnitudes), len(test_positions)))
+    max_compressions = np.zeros((len(load_magnitudes), len(test_positions)))
+
+    print(f"\nTesting {len(load_magnitudes)} load magnitudes at {len(test_positions)} positions...")
+    print(f"Load range: {load_magnitudes[0]:.0f} to {load_magnitudes[-1]:.0f} N")
+
+    # Iterate through loads and positions
+    for i, load_mag in enumerate(load_magnitudes):
+        for j, pos_node in enumerate(test_positions):
+            # Apply load at current position
+            loads = np.zeros([n_nodes, 2], float)
+            loads[pos_node, 1] = -load_mag
+
+            # Add self-weight
+            for iEl in range(C.shape[0]):
+                n1, n2 = C[iEl]
+                L = np.linalg.norm(X[n2] - X[n1])
+                A = element_areas[iEl]
+                volume = A * L
+                mass = rho_steel * volume
+                weight = mass * g
+                loads[n1, 1] -= weight / 2
+                loads[n2, 1] -= weight / 2
+
+            load_vector = loads.reshape(1, 2*n_nodes).ravel()[~bc_mask]
+
+            # Solve
+            displacements = np.zeros([2*n_nodes], float)
+            displacements[~bc_mask] = np.linalg.solve(k_reduced, load_vector)
+            D = displacements.reshape(n_nodes, 2)
+
+            # Calculate maximum deflection
+            max_deflections[i, j] = np.max(np.abs(D))
+
+            # Calculate stresses
+            element_stresses = []
+            for iEl in range(C.shape[0]):
+                n1, n2 = C[iEl]
+                d_el = np.concatenate([D[n1], D[n2]])
+                A = element_areas[iEl]
+
+                k_el = element_stiffness(X[n1], X[n2], A, E)
+                f_el = k_el @ d_el
+
+                d_vec = X[n2] - X[n1]
+                L = np.linalg.norm(d_vec)
+
+                if L < 1e-10:
+                    element_stresses.append(0)
+                    continue
+
+                u_vec = d_vec / L
+                du = np.array([d_el[2] - d_el[0], d_el[3] - d_el[1]])
+                epsilon = np.dot(du, u_vec) / L
+                stress = E * epsilon
+                element_stresses.append(stress)
+
+            element_stresses = np.array(element_stresses)
+            max_stresses[i, j] = np.max(np.abs(element_stresses))
+            max_tensions[i, j] = np.max(element_stresses)
+            max_compressions[i, j] = np.min(element_stresses)
+
+    # Plot results
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+    positions_x = X[boom_bot_nodes, 0]
+
+    # Plot 1: Max deflection vs position
+    ax1 = axes[0, 0]
+    for i, load_mag in enumerate(load_magnitudes):
+        ax1.plot(positions_x, max_deflections[i, :] * 1000, 'o-',
+                label=f'{load_mag/1000:.1f} kN', linewidth=2, markersize=6)
+    ax1.set_xlabel('Position along crane (m)', fontsize=12)
+    ax1.set_ylabel('Maximum deflection (mm)', fontsize=12)
+    ax1.set_title('Maximum Deflection vs Load Position', fontsize=14, fontweight='bold')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # Plot 2: Max stress vs position
+    ax2 = axes[0, 1]
+    for i, load_mag in enumerate(load_magnitudes):
+        ax2.plot(positions_x, max_stresses[i, :] / 1e6, 'o-',
+                label=f'{load_mag/1000:.1f} kN', linewidth=2, markersize=6)
+    ax2.axhline(y=100, color='r', linestyle='--', label='Allowable (100 MPa)')
+    ax2.set_xlabel('Position along crane (m)', fontsize=12)
+    ax2.set_ylabel('Maximum stress (MPa)', fontsize=12)
+    ax2.set_title('Maximum Stress vs Load Position', fontsize=14, fontweight='bold')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    # Plot 3: Max tensile stress vs position
+    ax3 = axes[1, 0]
+    for i, load_mag in enumerate(load_magnitudes):
+        ax3.plot(positions_x, max_tensions[i, :] / 1e6, 'o-',
+                label=f'{load_mag/1000:.1f} kN', linewidth=2, markersize=6)
+    ax3.axhline(y=100, color='r', linestyle='--', label='Allowable (100 MPa)')
+    ax3.set_xlabel('Position along crane (m)', fontsize=12)
+    ax3.set_ylabel('Maximum tensile stress (MPa)', fontsize=12)
+    ax3.set_title('Maximum Tensile Stress vs Load Position', fontsize=14, fontweight='bold')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+
+    # Plot 4: Max compressive stress vs position
+    ax4 = axes[1, 1]
+    for i, load_mag in enumerate(load_magnitudes):
+        ax4.plot(positions_x, max_compressions[i, :] / 1e6, 'o-',
+                label=f'{load_mag/1000:.1f} kN', linewidth=2, markersize=6)
+    ax4.axhline(y=-100, color='r', linestyle='--', label='Allowable (-100 MPa)')
+    ax4.set_xlabel('Position along crane (m)', fontsize=12)
+    ax4.set_ylabel('Maximum compressive stress (MPa)', fontsize=12)
+    ax4.set_title('Maximum Compressive Stress vs Load Position', fontsize=14, fontweight='bold')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+    # Print summary
+    print("\n" + "="*70)
+    print("ANALYSIS SUMMARY")
+    print("="*70)
+    print(f"Overall maximum deflection: {np.max(max_deflections)*1000:.2f} mm")
+    print(f"Overall maximum stress: {np.max(max_stresses)/1e6:.2f} MPa")
+    print(f"Maximum tensile stress: {np.max(max_tensions)/1e6:.2f} MPa")
+    print(f"Maximum compressive stress: {np.min(max_compressions)/1e6:.2f} MPa")
+    print("="*70)
+
+    return max_deflections, max_stresses, positions_x
+
+def animate_moving_load(crane_data, load_magnitude=30000, scale_factor=100, interval=200):
+    '''
+    Create an animated time-lapse of crane deformation as load moves along bottom chord
+
+    Parameters:
+    -----------
+    crane_data : dict
+        Crane design data from load_crane()
+    load_magnitude : float
+        Magnitude of the moving load in Newtons (default: 30000 N = 30 kN)
+    scale_factor : float
+        Scale factor for deformation visualization (default: 100)
+    interval : int
+        Time between frames in milliseconds (default: 200 ms)
+    '''
+    print("\n" + "="*70)
+    print("ANIMATED MOVING LOAD ANALYSIS")
+    print("="*70)
+    print(f"Load magnitude: {load_magnitude/1000:.1f} kN")
+    print(f"Deformation scale: {scale_factor}x")
+    print("Creating animation...")
+
+    # Extract crane data
+    X = crane_data['X']
+    C = crane_data['C']
+    tower_base = crane_data['tower_base']
+    boom_top_nodes = crane_data['boom_top_nodes']
+    boom_bot_nodes = crane_data['boom_bot_nodes']
+    thickness_params = crane_data['thickness_params']
+
+    # Material properties
+    E = 200e9
+    rho_steel = 7850
+    g = 9.81
+
+    # Build element areas
+    element_areas = []
+    for iEl in range(C.shape[0]):
+        d_outer = thickness_params[2*iEl]
+        d_inner = thickness_params[2*iEl + 1]
+
+        min_wall = 0.002
+        if d_inner >= d_outer - min_wall:
+            d_inner = d_outer - min_wall
+        if d_inner < 0.001:
+            d_inner = 0.001
+
+        A, I = hollow_circular_section(d_outer, d_inner)
+        element_areas.append(A)
+
+    # Boundary conditions
+    n_nodes = X.shape[0]
+    bc = np.full((n_nodes, 2), False)
+    bc[boom_bot_nodes[0], :] = True
+    bc[tower_base, :] = True
+
+    bc_mask = bc.reshape(1, 2*n_nodes).ravel()
+
+    # Assembly global stiffness matrix
+    k_global = np.zeros([2*n_nodes, 2*n_nodes], float)
+    for iEl in range(C.shape[0]):
+        A = element_areas[iEl]
+        dof = dof_el(C[iEl,0], C[iEl,1])
+        k_elemental = element_stiffness(X[C[iEl,0],:], X[C[iEl,1],:], A, E)
+        k_global[np.ix_(dof, dof)] += k_elemental
+
+    k_reduced = k_global[~bc_mask][:, ~bc_mask]
+
+    # Test positions
+    test_positions = boom_bot_nodes
+
+    # Calculate deformations for each position
+    deformations = []
+    max_deflections_list = []
+
+    for pos_node in test_positions:
+        loads = np.zeros([n_nodes, 2], float)
+        loads[pos_node, 1] = -load_magnitude
+
+        # Add self-weight
+        for iEl in range(C.shape[0]):
+            n1, n2 = C[iEl]
+            L = np.linalg.norm(X[n2] - X[n1])
+            A = element_areas[iEl]
+            volume = A * L
+            mass = rho_steel * volume
+            weight = mass * g
+            loads[n1, 1] -= weight / 2
+            loads[n2, 1] -= weight / 2
+
+        load_vector = loads.reshape(1, 2*n_nodes).ravel()[~bc_mask]
+
+        # Solve
+        displacements = np.zeros([2*n_nodes], float)
+        displacements[~bc_mask] = np.linalg.solve(k_reduced, load_vector)
+        D = displacements.reshape(n_nodes, 2)
+
+        deformations.append(D)
+        tip_deflection = abs(D[boom_top_nodes[-1], 1])
+        max_deflections_list.append(tip_deflection)
+
+    # Create animation
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10))
+
+    def init():
+        ax1.clear()
+        ax2.clear()
+        return []
+
+    def update(frame):
+        ax1.clear()
+        ax2.clear()
+
+        pos_node = test_positions[frame]
+        D = deformations[frame]
+        X_deformed = X + D * scale_factor
+
+        # Plot 1: Original and deformed structure
+        for iEl in range(C.shape[0]):
+            ax1.plot([X[C[iEl,0],0], X[C[iEl,1],0]],
+                    [X[C[iEl,0],1], X[C[iEl,1],1]],
+                    'gray', linewidth=1, alpha=0.3, linestyle='--')
+
+        for iEl in range(C.shape[0]):
+            ax1.plot([X_deformed[C[iEl,0],0], X_deformed[C[iEl,1],0]],
+                    [X_deformed[C[iEl,0],1], X_deformed[C[iEl,1],1]],
+                    'b-', linewidth=2)
+
+        # Mark load position
+        load_pos = X[pos_node]
+        ax1.arrow(load_pos[0], load_pos[1] + 0.5, 0, -0.3,
+                 head_width=0.5, head_length=0.2, fc='red', ec='red', linewidth=3)
+        ax1.plot(load_pos[0], load_pos[1], 'ro', markersize=15, label='Load Position')
+
+        # Mark supports
+        ax1.plot(X[boom_bot_nodes[0], 0], X[boom_bot_nodes[0], 1], 'g^',
+                markersize=12, label='Pin Support')
+        ax1.plot(X[tower_base, 0], X[tower_base, 1], 'g^', markersize=12)
+
+        ax1.set_xlabel('x (m)', fontsize=12)
+        ax1.set_ylabel('y (m)', fontsize=12)
+        ax1.set_title(f'Crane Deformation - Load at x = {X[pos_node, 0]:.2f} m (Scale: {scale_factor}x)\n'
+                     f'Load: {load_magnitude/1000:.1f} kN | Tip Deflection: {max_deflections_list[frame]*1000:.2f} mm',
+                     fontsize=14, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+        ax1.axis('equal')
+        ax1.legend(loc='upper right')
+
+        # Plot 2: Tip deflection profile
+        positions_x = X[boom_bot_nodes, 0]
+        ax2.plot(positions_x, np.array(max_deflections_list) * 1000, 'b-o', linewidth=2, markersize=8)
+        ax2.plot(X[pos_node, 0], max_deflections_list[frame] * 1000, 'ro', markersize=15)
+        ax2.axvline(x=X[pos_node, 0], color='r', linestyle='--', alpha=0.5)
+        ax2.set_xlabel('Load Position along crane (m)', fontsize=12)
+        ax2.set_ylabel('Tip Deflection (mm)', fontsize=12)
+        ax2.set_title('Tip Deflection vs Load Position', fontsize=12, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        return []
+
+    anim = FuncAnimation(fig, update, init_func=init, frames=len(test_positions),
+                        interval=interval, blit=False, repeat=True)
+
+    print("Animation created! Close the window to continue...")
+    plt.show()
+
+    print("="*70)
+
+    return anim
+
 if __name__ == '__main__':
-    result = optimize_crane()
+    import sys
+
+    # Parse command line arguments
+    maxiter = 100  # Default
+    popsize = 15   # Default
+
+    if len(sys.argv) > 1:
+        try:
+            maxiter = int(sys.argv[1])
+            print(f"Using maxiter from command line: {maxiter}")
+        except ValueError:
+            print(f"Invalid maxiter argument: {sys.argv[1]}, using default: {maxiter}")
+
+    if len(sys.argv) > 2:
+        try:
+            popsize = int(sys.argv[2])
+            print(f"Using popsize from command line: {popsize}")
+        except ValueError:
+            print(f"Invalid popsize argument: {sys.argv[2]}, using default: {popsize}")
+
+    # Run optimization
+    result = optimize_crane(maxiter=10, popsize=5)
+
+    # Save the best design
+    save_best_crane(result)
