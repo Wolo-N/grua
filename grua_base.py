@@ -1,106 +1,12 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
-from matplotlib.colors import Normalize
-import matplotlib.cm as cm
 from matplotlib.animation import FuncAnimation
 import time
 
 # Importar utilidades compartidas
 from fem_utils import *
 from analysis_utils import *
-
-def plot_truss(X, C, title="Truss Structure", scale_factor=1, show_nodes=True):
-    '''Graficar estructura de cercha con numeración opcional de nodos'''
-    plt.figure(figsize=(15, 8))
-
-    # Graficar elementos
-    for iEl in range(C.shape[0]):
-        plt.plot([X[C[iEl,0],0], X[C[iEl,1],0]],
-                [X[C[iEl,0],1], X[C[iEl,1],1]],
-                'b-', linewidth=2)
-
-    # Graficar nodos
-    if show_nodes:
-        plt.scatter(X[:,0], X[:,1], c='red', s=50, zorder=5)
-        for i in range(X.shape[0]):
-            plt.annotate(f'{i}', (X[i,0], X[i,1]), xytext=(5,5),
-                        textcoords='offset points', fontsize=8)
-
-    plt.xlabel('x (m)')
-    plt.ylabel('y (m)')
-    plt.title(title)
-    plt.grid(True, alpha=0.3)
-    plt.axis('equal')
-    plt.show()
-
-def plot_stress_heatmap(X, C, stresses, element_areas, title="Stress Distribution Heatmap"):
-    '''
-    Graficar estructura de cercha con visualización de mapa de calor de tensiones
-
-    Parámetros:
-    -----------
-    X : ndarray
-        Coordenadas de nodos
-    C : ndarray
-        Matriz de conectividad
-    stresses : ndarray
-        Valores de tensión para cada elemento (Pa)
-    element_areas : list
-        Áreas de sección transversal para cada elemento
-    title : str
-        Título del gráfico
-    '''
-    fig, ax = plt.subplots(figsize=(16, 10))
-
-    # Crear segmentos de línea para cada elemento
-    segments = []
-    for iEl in range(C.shape[0]):
-        n1, n2 = C[iEl]
-        segments.append([(X[n1, 0], X[n1, 1]), (X[n2, 0], X[n2, 1])])
-
-    # Normalizar valores de tensión para mapa de colores
-    stress_mpa = stresses / 1e6  # Convertir a MPa
-    norm = Normalize(vmin=np.min(stress_mpa), vmax=np.max(stress_mpa))
-
-    # Crear mapa de colores (azul para compresión, rojo para tracción)
-    cmap = cm.RdBu_r  # Invertido para que rojo sea tracción, azul sea compresión
-
-    # Crear colección de líneas con colores basados en tensión
-    lc = LineCollection(segments, cmap=cmap, norm=norm, linewidths=4)
-    lc.set_array(stress_mpa)
-
-    # Agregar colección de líneas al gráfico
-    line = ax.add_collection(lc)
-
-    # Agregar barra de color
-    cbar = fig.colorbar(line, ax=ax, pad=0.02)
-    cbar.set_label('Stress (MPa)\n← Compression | Tension →', rotation=270, labelpad=25)
-
-    # Graficar nodos
-    ax.scatter(X[:, 0], X[:, 1], c='black', s=30, zorder=5, alpha=0.5)
-
-    # Etiquetas y formato
-    ax.set_xlabel('x (m)', fontsize=12)
-    ax.set_ylabel('y (m)', fontsize=12)
-    ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3)
-    ax.set_aspect('equal')
-
-    # Auto-escalar para ajustar datos
-    ax.autoscale()
-
-    plt.tight_layout()
-    plt.show()
-
-    # Imprimir estadísticas de tensión
-    print("\n" + "="*60)
-    print("RESUMEN DE ANÁLISIS DE TENSIONES")
-    print("="*60)
-    print(f"Tensión de Tracción Máxima:     {np.max(stress_mpa):8.2f} MPa")
-    print(f"Tensión de Compresión Máxima: {np.min(stress_mpa):8.2f} MPa")
-    print(f"Magnitud de Tensión Promedio:   {np.mean(np.abs(stress_mpa)):8.2f} MPa")
-    print("="*60)
+from plotting_utils import plot_truss, plot_stress_heatmap, plot_moving_load_analysis
 
 def design_crane_geometry():
     '''Diseñar geometría de cercha de grúa de 30m'''
@@ -189,16 +95,6 @@ def crane_simulation():
 
     print(f"Estructura creada con {X.shape[0]} nodos y {C.shape[0]} elementos")
 
-    # Depuración: Imprimir información de conectividad
-    print(f"\nPosición Nodo 0 (tower_base): {X[0]}")
-    print(f"boom_top_nodes: {boom_top_nodes}")
-    print(f"boom_bot_nodes: {boom_bot_nodes}")
-    print(f"\nPrimeros 10 elementos:")
-    for i in range(min(10, C.shape[0])):
-        print(f"  Elemento {i}: nodos {C[i,0]} a {C[i,1]}")
-    print(f"\nÚltimos 5 elementos:")
-    for i in range(max(0, C.shape[0]-5), C.shape[0]):
-        print(f"  Elemento {i}: nodos {C[i,0]} a {C[i,1]}")
 
     # Graficar estructura original
     plot_truss(X, C, "30m Crane Truss Structure - Original", show_nodes=True)
@@ -525,75 +421,10 @@ def analyze_moving_load():
             max_tensions[i, j] = np.max(element_stresses)
             max_compressions[i, j] = np.min(element_stresses)
 
-    # Graficar resultados
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-    # Posición a lo largo de la grúa (coordenadas x de nodos inferiores)
+    # Graficar resultados usando función de utilidades
     positions_x = X[boom_bot_nodes, 0]
-
-    # Gráfico 1: Deflexión máx vs posición para diferentes cargas
-    ax1 = axes[0, 0]
-    for i, load_mag in enumerate(load_magnitudes):
-        ax1.plot(positions_x, max_deflections[i, :] * 1000, 'o-',
-                label=f'{load_mag/1000:.1f} kN', linewidth=2, markersize=6)
-    ax1.set_xlabel('Position along crane (m)', fontsize=12)
-    ax1.set_ylabel('Maximum deflection (mm)', fontsize=12)
-    ax1.set_title('Maximum Deflection vs Load Position', fontsize=14, fontweight='bold')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-
-    # Gráfico 2: Tensión máx vs posición para diferentes cargas
-    ax2 = axes[0, 1]
-    for i, load_mag in enumerate(load_magnitudes):
-        ax2.plot(positions_x, max_stresses[i, :] / 1e6, 'o-',
-                label=f'{load_mag/1000:.1f} kN', linewidth=2, markersize=6)
-    ax2.axhline(y=100, color='r', linestyle='--', label='Allowable (100 MPa)')
-    ax2.set_xlabel('Position along crane (m)', fontsize=12)
-    ax2.set_ylabel('Maximum stress (MPa)', fontsize=12)
-    ax2.set_title('Maximum Stress vs Load Position', fontsize=14, fontweight='bold')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-
-    # Gráfico 3: Tensión de tracción máx vs posición
-    ax3 = axes[1, 0]
-    for i, load_mag in enumerate(load_magnitudes):
-        ax3.plot(positions_x, max_tensions[i, :] / 1e6, 'o-',
-                label=f'{load_mag/1000:.1f} kN', linewidth=2, markersize=6)
-    ax3.axhline(y=100, color='r', linestyle='--', label='Allowable (100 MPa)')
-    ax3.set_xlabel('Position along crane (m)', fontsize=12)
-    ax3.set_ylabel('Maximum tensile stress (MPa)', fontsize=12)
-    ax3.set_title('Maximum Tensile Stress vs Load Position', fontsize=14, fontweight='bold')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-
-    # Gráfico 4: Tensión de compresión máx vs posición
-    ax4 = axes[1, 1]
-    for i, load_mag in enumerate(load_magnitudes):
-        ax4.plot(positions_x, max_compressions[i, :] / 1e6, 'o-',
-                label=f'{load_mag/1000:.1f} kN', linewidth=2, markersize=6)
-    ax4.axhline(y=-100, color='r', linestyle='--', label='Allowable (-100 MPa)')
-    ax4.set_xlabel('Position along crane (m)', fontsize=12)
-    ax4.set_ylabel('Maximum compressive stress (MPa)', fontsize=12)
-    ax4.set_title('Maximum Compressive Stress vs Load Position', fontsize=14, fontweight='bold')
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
-
-    # Imprimir resumen
-    print("\n" + "="*70)
-    print("RESUMEN DE ANÁLISIS")
-    print("="*70)
-    print(f"Deflexión máxima general: {np.max(max_deflections)*1000:.2f} mm")
-    print(f"  Ocurre en: {load_magnitudes[np.unravel_index(np.argmax(max_deflections), max_deflections.shape)[0]]/1000:.1f} kN")
-    print(f"  Posición:  {positions_x[np.unravel_index(np.argmax(max_deflections), max_deflections.shape)[1]]:.2f} m")
-    print(f"\nTensión máxima general: {np.max(max_stresses)/1e6:.2f} MPa")
-    print(f"  Ocurre en: {load_magnitudes[np.unravel_index(np.argmax(max_stresses), max_stresses.shape)[0]]/1000:.1f} kN")
-    print(f"  Posición:  {positions_x[np.unravel_index(np.argmax(max_stresses), max_stresses.shape)[1]]:.2f} m")
-    print(f"\nTensión de tracción máxima: {np.max(max_tensions)/1e6:.2f} MPa")
-    print(f"Tensión de compresión máxima: {np.min(max_compressions)/1e6:.2f} MPa")
-    print("="*70)
+    plot_moving_load_analysis(max_deflections, max_stresses, max_tensions,
+                              max_compressions, positions_x, load_magnitudes)
 
     return max_deflections, max_stresses, positions_x
 
