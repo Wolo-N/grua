@@ -263,4 +263,4 @@ if __name__ == '__main__':
         #sys.exit(1)
 
     #pkl_file = sys.argv[1]
-    run_crane_analysis("gruita3_iterations_20251028_160727/best_crane.pkl")
+    run_crane_analysis("gruita3_iterations_20251029_190901/best_crane.pkl")

@@ -764,8 +764,8 @@ if __name__ == '__main__':
     import sys
 
     # Parsear argumentos de línea de comandos
-    maxiter = 100  # Default
-    popsize = 15   # Default
+    maxiter = 5  # Default
+    popsize = 10   # Default
 
     if len(sys.argv) > 1:
         try:

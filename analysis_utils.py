@@ -8,7 +8,7 @@ import numpy as np
 from fem_utils import hollow_circular_section
 
 
-def calculate_cost(m, n_elementos, n_uniones, m0=1000, n_elementos_0=50, n_uniones_0=100):
+def calculate_cost(m, n_elementos, n_uniones, m0=8094, n_elementos_0=51, n_uniones_0=27):
     '''
     Calcular el costo de la estructura de la grúa
 
