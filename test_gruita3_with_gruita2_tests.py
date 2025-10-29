@@ -339,17 +339,17 @@ def analyze_moving_load_gruita3(crane_data, load_magnitudes=None):
     Gruita2-style moving load analysis
     """
     from gruita3 import analyze_moving_load
-    return analyze_moving_load(crane_data, load_magnitudes)
+    return analyze_moving_load(crane_data, load_magnitudes, scale_factor=1)
 
-def animate_moving_load_gruita3(crane_data, load_magnitude=30000):
+def animate_moving_load_gruita3(crane_data, load_magnitude=60000):
     """
     Gruita2-style moving load animation
     """
     from gruita3 import animate_moving_load
-    return animate_moving_load(crane_data, load_magnitude)
+    return animate_moving_load(crane_data, load_magnitude, scale_factor=1)
 
 def main():
-    print("="*80)
+    print("="*80),
     print("GRUITA3 CRANE - GRUITA2 TESTING FRAMEWORK")
     print("="*80)
 
