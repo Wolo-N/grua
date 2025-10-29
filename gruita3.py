@@ -11,6 +11,22 @@ from datetime import datetime
 import pickle
 import time
 
+# Import utility modules
+from fem_utils import (
+    element_stiffness,
+    dof_el,
+    hollow_circular_section,
+    assemble_global_stiffness,
+    calculate_element_stresses,
+    apply_self_weight
+)
+from analysis_utils import (
+    calculate_cost,
+    calculate_security_factors,
+    calculate_buckling_load,
+    estimate_structure_mass
+)
+
 '''
 GRUITA 3 - GRÚA AUTO-OPTIMIZANTE
 =================================
@@ -30,41 +46,6 @@ best_objective = float('inf')
 best_design_vector = None  # Almacenar el mejor vector de diseño
 last_save_time = None  # Seguir cuándo guardamos por última vez
 output_dir = None  # Se establecerá en optimize_crane() con marca de tiempo
-
-def element_stiffness(n1, n2, A, E):
-    '''Devuelve la Matriz de Rigidez Elemental de Barra en coordenadas globales'''
-    d = n2 - n1
-    L = np.linalg.norm(d)
-
-    if L < 1e-10:
-        return np.zeros((4, 4), dtype=float)
-
-    c = d[0] / L
-    s = d[1] / L
-
-    k_local = (A * E / L) * np.array([[ 1, -1],
-                                      [-1,  1]], dtype=float)
-
-    T = np.array([[ c, s, 0, 0],
-                  [ 0, 0, c, s]], dtype=float)
-
-    k_structural = np.matmul(T.T, np.matmul(k_local, T))
-
-    return k_structural
-
-def dof_el(nnod1, nnod2):
-    '''Devuelve los DOF Elementales para Ensamblaje'''
-    return [2*(nnod1+1)-2,2*(nnod1+1)-1,2*(nnod2+1)-2,2*(nnod2+1)-1]
-
-def hollow_circular_section(d_outer, d_inner):
-    '''Calcular área de sección transversal y momento de inercia para sección circular hueca'''
-    r_outer = d_outer / 2
-    r_inner = d_inner / 2
-
-    A = np.pi * (r_outer**2 - r_inner**2)
-    I = np.pi / 4 * (r_outer**4 - r_inner**4)
-
-    return A, I
 
 def design_parametric_crane(n_segments, boom_height, connectivity_pattern, taper_ratio=1.0):
     '''
@@ -484,14 +465,8 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
 
     bc_mask = bc.reshape(1, 2*n_nodes).ravel()
 
-    # Ensamblar matriz de rigidez global
-    k_global = np.zeros([2*n_nodes, 2*n_nodes], float)
-
-    for iEl in range(n_elements):
-        A = element_areas[iEl]
-        dof = dof_el(C[iEl,0], C[iEl,1])
-        k_elemental = element_stiffness(X[C[iEl,0],:], X[C[iEl,1],:], A, E)
-        k_global[np.ix_(dof, dof)] += k_elemental
+    # Ensamblar matriz de rigidez global usando función de utilidades
+    k_global = assemble_global_stiffness(X, C, element_areas, E)
 
     # Verificar matriz singular
     k_reduced = k_global[~bc_mask][:, ~bc_mask]
@@ -510,14 +485,8 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
     loads = np.zeros([n_nodes, 2], float)
     loads[boom_top_nodes[-1], 1] = -max_load
 
-    # Agregar peso propio
-    for iEl in range(n_elements):
-        n1, n2 = C[iEl]
-        L = np.linalg.norm(X[n2] - X[n1])
-        A = element_areas[iEl]
-        weight = rho_steel * A * L * g
-        loads[n1, 1] -= weight / 2
-        loads[n2, 1] -= weight / 2
+    # Agregar peso propio usando función de utilidades
+    apply_self_weight(X, C, element_areas, loads, rho_steel, g)
 
     load_vector = loads.reshape(1, 2*n_nodes).ravel()[~bc_mask]
 
@@ -531,37 +500,8 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
             print("Matriz singular durante resolución")
         return 1e8
 
-    # Calcular tensiones y fuerzas
-    element_forces = []
-    element_stresses = []
-
-    for iEl in range(n_elements):
-        n1, n2 = C[iEl]
-        d_el = np.concatenate([D[n1], D[n2]])
-        A = element_areas[iEl]
-
-        k_el = element_stiffness(X[n1], X[n2], A, E)
-        f_el = k_el @ d_el
-
-        d_vec = X[n2] - X[n1]
-        L = np.linalg.norm(d_vec)
-
-        if L < 1e-10:
-            element_forces.append(0)
-            element_stresses.append(0)
-            continue
-
-        u_vec = d_vec / L
-        du = np.array([d_el[2] - d_el[0], d_el[3] - d_el[1]])
-        epsilon = np.dot(du, u_vec) / L
-        stress = E * epsilon
-        force = stress * A
-
-        element_forces.append(force)
-        element_stresses.append(stress)
-
-    element_forces = np.array(element_forces)
-    element_stresses = np.array(element_stresses)
+    # Calcular tensiones y fuerzas usando función de utilidades
+    element_forces, element_stresses = calculate_element_stresses(X, C, D, element_areas, E)
 
     # Calcular factores de seguridad
     sigma_max = np.max(np.abs(element_stresses))
@@ -572,32 +512,20 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
     else:
         FS_tension = sigma_adm / sigma_max
 
-    # Verificación de pandeo
+    # Verificación de pandeo usando función de utilidades
+    P_critica, max_compressed_length = calculate_buckling_load(
+        X, C, element_forces, element_inertias, E, boom_top_nodes
+    )
+
     P_max_compression = abs(np.min(element_forces))
-
-    # Encontrar carga crítica de pandeo
-    P_critica = 1e12
-    for iEl in range(n_elements):
-        if element_forces[iEl] < -1:  # Compresión
-            n1, n2 = C[iEl]
-            L = np.linalg.norm(X[n2] - X[n1])
-            I = element_inertias[iEl]
-            P_cr = (np.pi**2 * E * I) / (L**2)
-            if P_cr < P_critica:
-                P_critica = P_cr
-
     if P_max_compression < 1e-6:
         FS_pandeo = 1000
     else:
         FS_pandeo = P_critica / P_max_compression
 
-    # Calcular costo
-    m0 = 1000  # Masa de referencia (kg)
-    n_elementos_0 = 50
-    n_uniones_0 = 25
-
+    # Calcular costo usando función de utilidades
     n_uniones = n_nodes
-    cost = (total_mass / m0) + 1.5 * (n_elements / n_elementos_0) + 2 * (n_uniones / n_uniones_0)
+    cost = calculate_cost(total_mass, n_elements, n_uniones)
 
     # Penalizaciones por violaciones de seguridad
     penalty = 0
@@ -1018,14 +946,8 @@ def analyze_moving_load(crane_data, load_magnitudes=None):
 
     bc_mask = bc.reshape(1, 2*n_nodes).ravel()
 
-    # Ensamblar matriz de rigidez global
-    k_global = np.zeros([2*n_nodes, 2*n_nodes], float)
-    for iEl in range(C.shape[0]):
-        A = element_areas[iEl]
-        dof = dof_el(C[iEl,0], C[iEl,1])
-        k_elemental = element_stiffness(X[C[iEl,0],:], X[C[iEl,1],:], A, E)
-        k_global[np.ix_(dof, dof)] += k_elemental
-
+    # Ensamblar matriz de rigidez global usando función de utilidades
+    k_global = assemble_global_stiffness(X, C, element_areas, E)
     k_reduced = k_global[~bc_mask][:, ~bc_mask]
 
     # Parámetros de prueba
@@ -1049,16 +971,8 @@ def analyze_moving_load(crane_data, load_magnitudes=None):
             loads = np.zeros([n_nodes, 2], float)
             loads[pos_node, 1] = -load_mag
 
-            # Agregar peso propio
-            for iEl in range(C.shape[0]):
-                n1, n2 = C[iEl]
-                L = np.linalg.norm(X[n2] - X[n1])
-                A = element_areas[iEl]
-                volume = A * L
-                mass = rho_steel * volume
-                weight = mass * g
-                loads[n1, 1] -= weight / 2
-                loads[n2, 1] -= weight / 2
+            # Agregar peso propio usando función de utilidades
+            apply_self_weight(X, C, element_areas, loads, rho_steel, g)
 
             load_vector = loads.reshape(1, 2*n_nodes).ravel()[~bc_mask]
 
@@ -1070,30 +984,8 @@ def analyze_moving_load(crane_data, load_magnitudes=None):
             # Calcular deflexión máxima
             max_deflections[i, j] = np.max(np.abs(D))
 
-            # Calcular tensiones
-            element_stresses = []
-            for iEl in range(C.shape[0]):
-                n1, n2 = C[iEl]
-                d_el = np.concatenate([D[n1], D[n2]])
-                A = element_areas[iEl]
-
-                k_el = element_stiffness(X[n1], X[n2], A, E)
-                f_el = k_el @ d_el
-
-                d_vec = X[n2] - X[n1]
-                L = np.linalg.norm(d_vec)
-
-                if L < 1e-10:
-                    element_stresses.append(0)
-                    continue
-
-                u_vec = d_vec / L
-                du = np.array([d_el[2] - d_el[0], d_el[3] - d_el[1]])
-                epsilon = np.dot(du, u_vec) / L
-                stress = E * epsilon
-                element_stresses.append(stress)
-
-            element_stresses = np.array(element_stresses)
+            # Calcular tensiones usando función de utilidades
+            element_forces, element_stresses = calculate_element_stresses(X, C, D, element_areas, E)
             max_stresses[i, j] = np.max(np.abs(element_stresses))
             max_tensions[i, j] = np.max(element_stresses)
             max_compressions[i, j] = np.min(element_stresses)
@@ -1223,14 +1115,8 @@ def animate_moving_load(crane_data, load_magnitude=30000, scale_factor=100, inte
 
     bc_mask = bc.reshape(1, 2*n_nodes).ravel()
 
-    # Ensamblar matriz de rigidez global
-    k_global = np.zeros([2*n_nodes, 2*n_nodes], float)
-    for iEl in range(C.shape[0]):
-        A = element_areas[iEl]
-        dof = dof_el(C[iEl,0], C[iEl,1])
-        k_elemental = element_stiffness(X[C[iEl,0],:], X[C[iEl,1],:], A, E)
-        k_global[np.ix_(dof, dof)] += k_elemental
-
+    # Ensamblar matriz de rigidez global usando función de utilidades
+    k_global = assemble_global_stiffness(X, C, element_areas, E)
     k_reduced = k_global[~bc_mask][:, ~bc_mask]
 
     # Posiciones de prueba
