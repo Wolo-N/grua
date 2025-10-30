@@ -36,7 +36,7 @@ def calculate_cost(m, n_elementos, n_uniones, m0=8094, n_elementos_0=51, n_union
     return cost
 
 
-def calculate_security_factors(sigma_max, P_max, sigma_adm=100e6, P_critica=None):
+def calculate_security_factors(sigma_max, P_max, sigma_adm=250e6, P_critica=None):
     '''
     Calcular factores de seguridad para la estructura de la grúa
 
@@ -67,7 +67,7 @@ def calculate_security_factors(sigma_max, P_max, sigma_adm=100e6, P_critica=None
     return FS_tension, FS_pandeo
 
 
-def estimate_structure_mass(X, C, A_main=0.01, A_secondary=0.005, rho_steel=7850):
+def estimate_structure_mass(X, C, element_areas=None, A_main=0.01, A_secondary=0.005, rho_steel=7800):
     '''
     Estimar la masa total de la estructura
 
@@ -77,12 +77,14 @@ def estimate_structure_mass(X, C, A_main=0.01, A_secondary=0.005, rho_steel=7850
         Coordenadas de nodos
     C : ndarray
         Matriz de conectividad
+    element_areas : list o array, opcional
+        Áreas de cada elemento (m²). Si se proporciona, se usa en lugar de A_main/A_secondary
     A_main : float
-        Área de sección transversal de miembros principales (m²)
+        Área de sección transversal de miembros principales (m²) - solo si element_areas=None
     A_secondary : float
-        Área de sección transversal de miembros secundarios (m²)
+        Área de sección transversal de miembros secundarios (m²) - solo si element_areas=None
     rho_steel : float
-        Densidad del acero (kg/m³), por defecto = 7850 kg/m³
+        Densidad del acero (kg/m³), por defecto = 7800 kg/m³ (según consigna TP2)
 
     Retorna:
     --------
@@ -96,11 +98,16 @@ def estimate_structure_mass(X, C, A_main=0.01, A_secondary=0.005, rho_steel=7850
         d_vec = X[n2] - X[n1]
         L = np.linalg.norm(d_vec)
 
-        # Determinar sección transversal (simplificado: primeros elementos son miembros principales)
-        if iEl < 24:  # Número aproximado de elementos de cuerda
-            A = A_main
+        # Determinar área de sección transversal
+        if element_areas is not None:
+            # Usar áreas reales de los elementos
+            A = element_areas[iEl]
         else:
-            A = A_secondary
+            # Usar valores por defecto (simplificado: primeros elementos son miembros principales)
+            if iEl < 24:  # Número aproximado de elementos de cuerda
+                A = A_main
+            else:
+                A = A_secondary
 
         # Masa = densidad * volumen = densidad * área * longitud
         element_mass = rho_steel * A * L
@@ -155,7 +162,7 @@ def calculate_buckling_load(X, C, element_forces, element_inertias, E, boom_top_
 
 
 def analyze_cost_and_security(X, C, element_stresses, element_forces, element_inertias,
-                              boom_top_nodes=None, verbose=True):
+                              boom_top_nodes=None, element_areas=None, verbose=True):
     '''
     Analizar costo y factores de seguridad para la estructura de la grúa
 
@@ -173,6 +180,8 @@ def analyze_cost_and_security(X, C, element_stresses, element_forces, element_in
         Momentos de inercia de cada elemento
     boom_top_nodes : list, opcional
         Lista de índices de nodos superiores del brazo
+    element_areas : list o array, opcional
+        Áreas de cada elemento (m²). Si no se proporciona, usa valores por defecto
     verbose : bool
         Si True, imprime resultados
 
@@ -187,8 +196,8 @@ def analyze_cost_and_security(X, C, element_stresses, element_forces, element_in
     mass : float
         Masa total de la estructura (kg)
     '''
-    # Calcular masa de la estructura
-    mass = estimate_structure_mass(X, C)
+    # Calcular masa de la estructura usando las áreas reales de los elementos
+    mass = estimate_structure_mass(X, C, element_areas=element_areas)
 
     # Número de elementos y uniones
     n_elementos = C.shape[0]
@@ -202,7 +211,7 @@ def analyze_cost_and_security(X, C, element_stresses, element_forces, element_in
     P_max = np.max(np.abs(element_forces))
 
     # Tensión admisible
-    sigma_adm = 100e6  # 100 MPa
+    sigma_adm = 250e6  # 250 MPa (según consigna TP2)
 
     # Estimar carga crítica de pandeo
     E = 200e9

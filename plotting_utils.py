@@ -426,3 +426,276 @@ def animate_moving_load(X, C, element_areas, boom_top_nodes, boom_bot_nodes,
     print("="*70)
 
     return anim
+
+
+def generate_comprehensive_report(X, C, element_areas, element_inertias, boom_top_nodes,
+                                   boom_bot_nodes, tower_base, E, rho_steel, g,
+                                   load_range=(0, 100000)):
+    '''
+    Generar reporte comprensivo con todos los gráficos y tablas
+
+    Parámetros:
+    -----------
+    X : ndarray
+        Coordenadas de nodos
+    C : ndarray
+        Matriz de conectividad
+    element_areas : list
+        Áreas de elementos
+    element_inertias : list
+        Momentos de inercia de elementos
+    boom_top_nodes : list
+        Índices de nodos superiores
+    boom_bot_nodes : list
+        Índices de nodos inferiores
+    tower_base : int
+        Índice del nodo base de la torre
+    E : float
+        Módulo de Young
+    rho_steel : float
+        Densidad del acero
+    g : float
+        Aceleración gravitacional
+    load_range : tuple
+        Rango de cargas a analizar (min_load, max_load) en N (default: 0 a 100 kN)
+
+    Retorna:
+    --------
+    report_dict : dict
+        Diccionario con todos los resultados del análisis
+    '''
+    from fem_utils import dof_el, element_stiffness, calculate_element_stresses
+    from analysis_utils import calculate_buckling_load
+
+    print("\n" + "="*80)
+    print("GENERANDO REPORTE COMPRENSIVO DE LA ESTRUCTURA")
+    print("="*80)
+
+    n_nodes = X.shape[0]
+    n_elements = C.shape[0]
+
+    # Calcular masa total
+    total_mass = 0
+    for iEl in range(n_elements):
+        n1, n2 = C[iEl]
+        L = np.linalg.norm(X[n2] - X[n1])
+        volume = element_areas[iEl] * L
+        mass = rho_steel * volume
+        total_mass += mass
+
+    # Condiciones de borde
+    bc = np.full((n_nodes, 2), False)
+    bc[boom_bot_nodes[0], :] = True
+    bc[tower_base, :] = True
+    bc_mask = bc.reshape(1, 2*n_nodes).ravel()
+
+    # Ensamblar matriz de rigidez global
+    k_global = np.zeros([2*n_nodes, 2*n_nodes], float)
+    for iEl in range(n_elements):
+        A = element_areas[iEl]
+        dof = dof_el(C[iEl,0], C[iEl,1])
+        k_elemental = element_stiffness(X[C[iEl,0],:], X[C[iEl,1],:], A, E)
+        k_global[np.ix_(dof, dof)] += k_elemental
+
+    k_reduced = k_global[~bc_mask][:, ~bc_mask]
+
+    # Definir rango de cargas a probar (0 a 100 kN)
+    load_magnitudes = np.linspace(load_range[0], load_range[1], 6)  # 0, 20, 40, 60, 80, 100 kN
+    test_positions = boom_bot_nodes
+    n_positions = len(test_positions)
+    n_loads = len(load_magnitudes)
+
+    # Arrays para almacenar resultados (ahora 2D: cargas x posiciones)
+    max_deflections = np.zeros((n_loads, n_positions))
+    max_stresses_all = np.zeros((n_loads, n_positions))
+    max_tensions = np.zeros((n_loads, n_positions))
+    max_compressions = np.zeros((n_loads, n_positions))
+    min_fs_tension = np.zeros((n_loads, n_positions))
+    min_fs_buckling = np.zeros((n_loads, n_positions))
+
+    print(f"\nAnalizando cargas de {load_range[0]/1000:.1f} a {load_range[1]/1000:.1f} kN en {n_positions} posiciones...")
+    print(f"Total de análisis: {n_loads} cargas × {n_positions} posiciones = {n_loads * n_positions} casos")
+
+    # Iterar sobre todas las cargas y posiciones
+    for i, load_mag in enumerate(load_magnitudes):
+        for j, pos_node in enumerate(test_positions):
+            # Aplicar carga en posición actual
+            loads = np.zeros([n_nodes, 2], float)
+            loads[pos_node, 1] = -load_mag
+
+            # Agregar peso propio
+            for iEl in range(n_elements):
+                n1, n2 = C[iEl]
+                L = np.linalg.norm(X[n2] - X[n1])
+                A = element_areas[iEl]
+                volume = A * L
+                mass = rho_steel * volume
+                weight = mass * g
+                loads[n1, 1] -= weight / 2
+                loads[n2, 1] -= weight / 2
+
+            load_vector = loads.reshape(1, 2*n_nodes).ravel()[~bc_mask]
+
+            # Resolver
+            displacements = np.zeros([2*n_nodes], float)
+            displacements[~bc_mask] = np.linalg.solve(k_reduced, load_vector)
+            D = displacements.reshape(n_nodes, 2)
+
+            # Calcular deflexión máxima
+            max_deflections[i, j] = np.max(np.abs(D))
+
+            # Calcular tensiones y fuerzas
+            element_forces, element_stresses = calculate_element_stresses(X, C, D, element_areas, E)
+
+            max_stresses_all[i, j] = np.max(np.abs(element_stresses))
+            max_tensions[i, j] = np.max(element_stresses)
+            max_compressions[i, j] = np.min(element_stresses)
+
+            # Calcular factores de seguridad
+            sigma_adm = 250e6  # 250 MPa (según consigna TP2)
+            if max_stresses_all[i, j] > 1e-6:
+                min_fs_tension[i, j] = sigma_adm / max_stresses_all[i, j]
+            else:
+                min_fs_tension[i, j] = 1000
+
+            # Factor de seguridad por pandeo
+            P_critica, _ = calculate_buckling_load(X, C, element_forces, element_inertias, E, boom_top_nodes)
+            P_max_compression = abs(np.min(element_forces))
+
+            if P_max_compression > 1e-6:
+                min_fs_buckling[i, j] = P_critica / P_max_compression
+            else:
+                min_fs_buckling[i, j] = 1000  # Sin compresión significativa
+
+    print(f"Análisis completado: {n_loads * n_positions} casos evaluados")
+
+    # Crear figura con múltiples subgráficos (2x3 sin tabla)
+    fig = plt.figure(figsize=(20, 10))
+    gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
+
+    positions_x = X[boom_bot_nodes, 0]
+
+    # Gráfico 1: Estructura con numeración de nodos
+    ax1 = fig.add_subplot(gs[0, :])
+    for iEl in range(n_elements):
+        ax1.plot([X[C[iEl,0],0], X[C[iEl,1],0]],
+                [X[C[iEl,0],1], X[C[iEl,1],1]],
+                'b-', linewidth=2)
+    ax1.scatter(X[:,0], X[:,1], c='red', s=50, zorder=5)
+    for i in range(n_nodes):
+        ax1.annotate(f'{i}', (X[i,0], X[i,1]), xytext=(5,5),
+                    textcoords='offset points', fontsize=8)
+    ax1.set_xlabel('x (m)', fontsize=10)
+    ax1.set_ylabel('y (m)', fontsize=10)
+    ax1.set_title(f'Estructura Óptima: {n_nodes} nodos, {n_elements} elementos\nPeso: {total_mass:.2f} kg',
+                 fontsize=12, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.axis('equal')
+
+    # Gráfico 2: Deflexión máxima vs posición (múltiples cargas)
+    ax2 = fig.add_subplot(gs[1, 0])
+    for i, load_mag in enumerate(load_magnitudes):
+        ax2.plot(positions_x, max_deflections[i, :] * 1000, 'o-',
+                linewidth=2, markersize=6, label=f'{load_mag/1000:.0f} kN')
+    ax2.axhline(y=200, color='r', linestyle='--', linewidth=2, label='Límite 200mm')
+    ax2.set_xlabel('Posición de carga (m)', fontsize=10)
+    ax2.set_ylabel('Deflexión máxima (mm)', fontsize=10)
+    ax2.set_title('Deformaciones Máximas\n(Cargas: 0-100 kN)', fontsize=11, fontweight='bold')
+    ax2.legend(fontsize=8)
+    ax2.grid(True, alpha=0.3)
+
+    # Gráfico 3: Tensión máxima vs posición (múltiples cargas)
+    ax3 = fig.add_subplot(gs[1, 1])
+    for i, load_mag in enumerate(load_magnitudes):
+        ax3.plot(positions_x, max_stresses_all[i, :] / 1e6, 'o-',
+                linewidth=2, markersize=6, label=f'{load_mag/1000:.0f} kN')
+    ax3.axhline(y=100, color='r', linestyle='--', linewidth=2, label='Admisible 100 MPa')
+    ax3.set_xlabel('Posición de carga (m)', fontsize=10)
+    ax3.set_ylabel('Tensión máxima (MPa)', fontsize=10)
+    ax3.set_title('Tensiones Máximas\n(Cargas: 0-100 kN)', fontsize=11, fontweight='bold')
+    ax3.legend(fontsize=8)
+    ax3.grid(True, alpha=0.3)
+
+    # Gráfico 4: Factor de seguridad mínimo (múltiples cargas)
+    ax4 = fig.add_subplot(gs[1, 2])
+    fs_min_combined = np.minimum(min_fs_tension, min_fs_buckling)
+    for i, load_mag in enumerate(load_magnitudes):
+        if load_mag > 0:  # Solo graficar para cargas no nulas
+            ax4.plot(positions_x, fs_min_combined[i, :], 'o-',
+                    linewidth=2, markersize=6, label=f'{load_mag/1000:.0f} kN')
+    ax4.axhline(y=2.0, color='r', linestyle='--', linewidth=2, label='FS mínimo = 2.0')
+    ax4.set_xlabel('Posición de carga (m)', fontsize=10)
+    ax4.set_ylabel('Factor de Seguridad', fontsize=10)
+    ax4.set_title('Factor de Seguridad Mínimo\n(Cargas: 0-100 kN)', fontsize=11, fontweight='bold')
+    ax4.legend(fontsize=8)
+    ax4.grid(True, alpha=0.3)
+    ax4.set_ylim(bottom=0, top=min(20, np.max(fs_min_combined[1:, :]) * 1.1))  # Limitar para mejor visualización
+
+    plt.suptitle('REPORTE COMPRENSIVO DE ANÁLISIS ESTRUCTURAL',
+                fontsize=14, fontweight='bold', y=0.98)
+
+    plt.savefig('reporte_estructural_completo.png', dpi=300, bbox_inches='tight')
+    print("\nReporte guardado como 'reporte_estructural_completo.png'")
+    plt.show()
+
+    # Crear tabla detallada en formato de texto para cada carga
+    print("\n" + "="*120)
+    print("TABLA DETALLADA DE RESULTADOS POR CARGA Y POSICIÓN")
+    print("="*120)
+
+    for i, load_mag in enumerate(load_magnitudes):
+        if i == 0:  # Saltar carga 0
+            continue
+
+        print(f"\nCARGA: {load_mag/1000:.0f} kN")
+        print("─" * 120)
+        print(f"{'Pos':<4} {'X (m)':<8} {'Deflexión':<12} {'Tensión':<12} {'Tracción':<12} {'Compresión':<14} {'FS Ten':<10} {'FS Pand':<10} {'FS Min':<10}")
+        print(f"{'':4} {'':8} {'(mm)':<12} {'(MPa)':<12} {'(MPa)':<12} {'(MPa)':<14} {'':10} {'':10} {'':10}")
+        print("─" * 120)
+
+        for j in range(n_positions):
+            fs_min = min(min_fs_tension[i, j], min_fs_buckling[i, j])
+            print(f"{j:<4} {positions_x[j]:<8.2f} {max_deflections[i, j]*1000:<12.2f} {max_stresses_all[i, j]/1e6:<12.2f} "
+                  f"{max_tensions[i, j]/1e6:<12.2f} {max_compressions[i, j]/1e6:<14.2f} {min_fs_tension[i, j]:<10.2f} "
+                  f"{min_fs_buckling[i, j]:<10.2f} {fs_min:<10.2f}")
+
+    print("="*120)
+
+    # Resumen general
+    print("\n" + "="*80)
+    print("RESUMEN GENERAL")
+    print("="*80)
+    print(f"Estructura: {n_nodes} nodos, {n_elements} elementos")
+    print(f"Peso total: {total_mass:.2f} kg")
+    print(f"\nRango de cargas analizadas: {load_range[0]/1000:.0f} - {load_range[1]/1000:.0f} kN")
+    print(f"Número de posiciones: {n_positions}")
+    print(f"Total de casos analizados: {n_loads * n_positions}")
+    print(f"\nValores máximos (todas las cargas):")
+    print(f"  Deflexión máxima: {np.max(max_deflections)*1000:.2f} mm")
+    print(f"  Tensión máxima: {np.max(max_stresses_all)/1e6:.2f} MPa")
+    print(f"  FS mínimo: {np.min(fs_min_combined[1:, :]):.2f}")  # Excluir carga 0
+
+    is_safe = np.min(fs_min_combined[1:, :]) >= 2.0
+    print(f"\nEstado de la estructura: {'SEGURO ✓' if is_safe else 'INSEGURO ✗'}")
+    print("="*80)
+
+    # Crear diccionario de resultados
+    report_dict = {
+        'X': X,
+        'C': C,
+        'n_nodes': n_nodes,
+        'n_elements': n_elements,
+        'total_mass': total_mass,
+        'positions_x': positions_x,
+        'load_magnitudes': load_magnitudes,
+        'max_deflections': max_deflections,  # Ahora 2D: [n_loads x n_positions]
+        'max_stresses': max_stresses_all,
+        'max_tensions': max_tensions,
+        'max_compressions': max_compressions,
+        'min_fs_tension': min_fs_tension,
+        'min_fs_buckling': min_fs_buckling,
+        'min_fs_combined': fs_min_combined,
+        'is_safe': is_safe
+    }
+
+    return report_dict

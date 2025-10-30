@@ -6,7 +6,7 @@ import time
 # Importar utilidades compartidas
 from fem_utils import *
 from analysis_utils import *
-from plotting_utils import plot_truss, plot_stress_heatmap, plot_moving_load_analysis
+from plotting_utils import *
 
 def design_crane_geometry():
     '''Diseñar geometría de cercha de grúa de 30m'''
@@ -109,8 +109,8 @@ def crane_simulation():
     A_strut, I_strut = hollow_circular_section(d_outer_strut, d_inner_strut)
 
     # Cables (miembros en tracción: diagonales/soportes)
-    d_outer_cable = 0.050  # 25 mm diámetro exterior
-    d_inner_cable = 0.000  # 20 mm diámetro interior (2.5 mm espesor de pared)
+    d_outer_cable = 0.050
+    d_inner_cable = 0.000
     A_cable, I_cable = hollow_circular_section(d_outer_cable, d_inner_cable)
 
     print(f"\nPropiedades de sección transversal:")
@@ -137,7 +137,7 @@ def crane_simulation():
 
     # Calcular peso propio basado en masa del elemento: Peso = ρ × V × g
     # Distribuir el peso de cada elemento equitativamente a sus dos nodos
-    rho_steel = 7850  # kg/m³ - densidad del acero
+    rho_steel = 7800  # kg/m³ - densidad del acero (según consigna TP2)
     g = 9.81  # m/s² - aceleración gravitacional
 
     for iEl in range(C.shape[0]):
@@ -289,7 +289,7 @@ def crane_simulation():
 
     # Analizar costo y factores de seguridad
     cost, FS_tension, FS_pandeo, mass = analyze_cost_and_security(
-        X, C, element_stresses, element_forces, element_inertias, boom_top_nodes)
+        X, C, element_stresses, element_forces, element_inertias, boom_top_nodes, element_areas)
 
     return X, C, D, loads, cost, FS_tension, FS_pandeo, mass
 
@@ -312,11 +312,11 @@ def analyze_moving_load():
 
     # Especificaciones de sección transversal circular hueca (en metros)
     d_outer_strut = 0.050  # 50 mm diámetro exterior
-    d_inner_strut = 0.020  # 46 mm diámetro interior
+    d_inner_strut = 0.045  # 46 mm diámetro interior
     A_strut, I_strut = hollow_circular_section(d_outer_strut, d_inner_strut)
 
-    d_outer_cable = 0.020  # 20 mm diámetro exterior
-    d_inner_cable = 0.016  # 16 mm diámetro interior
+    d_outer_cable = 0.050  # 20 mm diámetro exterior
+    d_inner_cable = 0.000  # 16 mm diámetro interior
     A_cable, I_cable = hollow_circular_section(d_outer_cable, d_inner_cable)
 
     # Condiciones de borde
@@ -457,11 +457,11 @@ def animate_moving_load(load_magnitude=30000, scale_factor=1, interval=200):
 
     # Especificaciones de sección transversal circular hueca (en metros)
     d_outer_strut = 0.050  # 50 mm diámetro exterior
-    d_inner_strut = 0.046  # 46 mm diámetro interior
+    d_inner_strut = 0.040  # 46 mm diámetro interior
     A_strut, I_strut = hollow_circular_section(d_outer_strut, d_inner_strut)
 
-    d_outer_cable = 0.020  # 20 mm diámetro exterior
-    d_inner_cable = 0.016  # 16 mm diámetro interior
+    d_outer_cable = 0.050  # 20 mm diámetro exterior
+    d_inner_cable = 0.000  # 16 mm diámetro interior
     A_cable, I_cable = hollow_circular_section(d_outer_cable, d_inner_cable)
 
     # Condiciones de borde
@@ -609,12 +609,73 @@ def animate_moving_load(load_magnitude=30000, scale_factor=1, interval=200):
 
     return anim
 
+def generate_complete_report(load_range=(0, 100000)):
+    '''
+    Generar reporte completo de la estructura con todos los gráficos y tablas
+
+    Parámetros:
+    -----------
+    load_range : tuple
+        Rango de cargas a analizar (min, max) en Newtons (default: 0 a 100 kN)
+
+    Retorna:
+    --------
+    report_dict : dict
+        Diccionario con todos los resultados del análisis
+    '''
+    # Crear geometría
+    X, tower_base, boom_top_nodes, boom_bot_nodes = design_crane_geometry()
+    C = create_crane_connectivity(tower_base, boom_top_nodes, boom_bot_nodes)
+
+    # Propiedades de material y sección
+    E = 200e9  # Módulo de Young del acero (Pa)
+    rho_steel = 7850  # kg/m³
+    g = 9.81  # m/s²
+
+    # Especificaciones de sección transversal circular hueca (en metros)
+    d_outer_strut = 0.050  # 50 mm diámetro exterior
+    d_inner_strut = 0.040  # 40 mm diámetro interior
+    A_strut, I_strut = hollow_circular_section(d_outer_strut, d_inner_strut)
+
+    d_outer_cable = 0.050  # 50 mm diámetro exterior
+    d_inner_cable = 0.000  # 0 mm diámetro interior (cable sólido)
+    A_cable, I_cable = hollow_circular_section(d_outer_cable, d_inner_cable)
+
+    # Construir listas de áreas e inercias de elementos
+    element_areas = []
+    element_inertias = []
+    num_strut_elements = 3 * len(boom_top_nodes) - 2
+
+    for iEl in range(C.shape[0]):
+        if iEl < num_strut_elements:  # Puntales
+            element_areas.append(A_strut)
+            element_inertias.append(I_strut)
+        else:  # Cables
+            element_areas.append(A_cable)
+            element_inertias.append(I_cable)
+
+    # Generar reporte comprensivo
+    report_dict = generate_comprehensive_report(
+        X, C, element_areas, element_inertias,
+        boom_top_nodes, boom_bot_nodes, tower_base,
+        E, rho_steel, g, load_range
+    )
+
+    return report_dict
+
+
 if __name__ == "__main__":
-    # Ejecutar simulación básica de grúa
+    # OPCIÓN 1: Generar reporte comprensivo completo
+    print("\n" + "="*80)
+    print("GENERANDO REPORTE COMPRENSIVO")
+    print("="*80)
+    report = generate_complete_report()
+
+    # OPCIÓN 2: Ejecutar simulación básica de grúa (comentado por defecto)
     crane_simulation()
 
-    # Ejecutar análisis de carga móvil
+    # OPCIÓN 3: Ejecutar análisis de carga móvil detallado (comentado por defecto)
     analyze_moving_load()
 
-    # Ejecutar visualización animada de carga móvil
+    # OPCIÓN 4: Ejecutar visualización animada de carga móvil (comentado por defecto)
     animate_moving_load(load_magnitude=60000, scale_factor=1, interval=200)
