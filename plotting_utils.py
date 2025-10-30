@@ -5,12 +5,6 @@ from matplotlib.colors import Normalize
 import matplotlib.cm as cm
 from matplotlib.animation import FuncAnimation
 
-"""
-PLOTTING UTILITIES FOR CRANE ANALYSIS
-======================================
-Unified plotting functions for visualizing crane structures and analysis results.
-"""
-
 def plot_truss(X, C, title="Truss Structure", scale_factor=1, show_nodes=True):
     '''Graficar estructura de cercha con numeración opcional de nodos'''
     plt.figure(figsize=(15, 8))

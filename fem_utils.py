@@ -1,10 +1,3 @@
-"""
-Utilidades de Elementos Finitos
-================================
-Funciones compartidas para análisis de elementos finitos de estructuras de cercha.
-Incluye cálculo de matrices de rigidez, ensamblaje y propiedades de secciones.
-"""
-
 import numpy as np
 
 
