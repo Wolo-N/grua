@@ -317,10 +317,5 @@ def generate_complete_report(crane_pkl_file, load_range=(0, 30000)):
 if __name__ == '__main__':
     import sys
 
-    #if len(sys.argv) < 2:
-     #   print("Uso: python grua_analizador.py <archivo_pkl>")
-      #  print("Ejemplo: python grua_analizador.py gruita3_iterations_20251028_160727/best_crane.pkl")
-        #sys.exit(1)
-
-    #pkl_file = sys.argv[1]
-    run_crane_analysis("gruita3_iterations_20251029_190901/best_crane.pkl")
+    run_crane_analysis("gruita3_iterations_20251029_225648/best_crane.pkl")
+    generate_complete_report("gruita3_iterations_20251029_225648/best_crane.pkl", load_range=(0, 30000))
