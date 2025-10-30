@@ -403,9 +403,9 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
     # Extraer espesores de miembros
     thickness_params = design_vector[6:6+expected_thickness_params]
 
-    # Propiedades del material
+    # Propiedades del material (según consigna TP2)
     E = 200e9
-    rho_steel = 7850
+    rho_steel = 7800  # kg/m³ (consigna TP2)
     g = 9.81
 
     # Construir áreas e inercias de elementos
@@ -484,7 +484,7 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
 
     # Calcular factores de seguridad
     sigma_max = np.max(np.abs(element_stresses))
-    sigma_adm = 100e6  # 100 MPa
+    sigma_adm = 250e6  # 250 MPa (según consigna TP2)
 
     if sigma_max < 1e-6:
         FS_tension = 1000
@@ -589,18 +589,6 @@ def optimize_crane(maxiter=100, popsize=15):
     iteration_counter = 0
     best_objective = float('inf')
 
-    print("="*80)
-    print("GRÚA AUTO-OPTIMIZANTE (GRUITA 3)")
-    print("="*80)
-    print("\nLa grúa se diseñará a sí misma optimizando:")
-    print("  1. Número de segmentos (distribución de nodos)")
-    print("  2. Altura del brazo (profundidad de cercha)")
-    print("  3. Patrón de conectividad (diagonales, verticales, cables de soporte)")
-    print("  4. Espesores individuales de miembros (cada elemento optimizado)")
-    print("\nObjetivo: Minimizar costo manteniendo FS >= 2.0")
-    print("\nLos gráficos se guardarán SOLO cuando se encuentre un mejor diseño!")
-    print("="*80)
-
     # Comenzar con una línea base razonable para estimar cantidad de elementos
     baseline_segments = 12
     baseline_height = 1.0
@@ -618,7 +606,7 @@ def optimize_crane(maxiter=100, popsize=15):
 
     bounds = [
         (8, 20),      # n_segments
-        (0.5, 2.0),   # boom_height
+        (0.1, 1.0),   # boom_height
         (0, 10),      # diag_type (ahora 0-10 incluyendo conectividad completa)
         (1, 3),       # vertical_spacing
         (1, 3),       # num_support_cables

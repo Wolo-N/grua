@@ -1,9 +1,3 @@
-"""
-Utilidades de Análisis Estructural
-===================================
-Funciones para análisis de costos, factores de seguridad y masas de estructuras.
-"""
-
 import numpy as np
 from fem_utils import hollow_circular_section
 

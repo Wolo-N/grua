@@ -97,7 +97,7 @@ def run_crane_analysis(crane_pkl_file):
 
     # Propiedades del material
     E = 200e9
-    rho_steel = 7850
+    rho_steel = 7800  # kg/m³ (consigna TP2)
     g = 9.81
 
     # Condiciones de borde
@@ -172,7 +172,7 @@ def analyze_moving_load_internal(crane_data, load_magnitudes=None):
 
     # Propiedades del material
     E = 200e9
-    rho_steel = 7850
+    rho_steel = 7800  # kg/m³ (consigna TP2)
     g = 9.81
 
     # Construir áreas de elementos desde parámetros de espesor
@@ -252,6 +252,66 @@ def analyze_moving_load_internal(crane_data, load_magnitudes=None):
 
     return max_deflections, max_stresses, positions_x
 
+
+def generate_complete_report(crane_pkl_file, load_range=(0, 30000)):
+    '''
+    Generar reporte completo de la estructura optimizada con todos los gráficos y tablas
+
+    Parámetros:
+    -----------
+    crane_pkl_file : str or Path
+        Ruta al archivo .pkl del diseño de grúa optimizado
+    load_range : tuple
+        Rango de cargas a analizar (min, max) en Newtons (default: 0 a 30 kN)
+
+    Retorna:
+    --------
+    report_dict : dict
+        Diccionario con todos los resultados del análisis
+    '''
+    # Cargar diseño de grúa optimizado
+    crane_data = load_crane(crane_pkl_file)
+
+    # Extraer datos
+    X = crane_data['X']
+    C = crane_data['C']
+    tower_base = crane_data['tower_base']
+    boom_top_nodes = crane_data['boom_top_nodes']
+    boom_bot_nodes = crane_data['boom_bot_nodes']
+    thickness_params = crane_data['thickness_params']
+
+    # Propiedades de material y sección
+    E = 200e9  # Módulo de Young del acero (Pa)
+    rho_steel = 7800  # kg/m³ (según consigna TP2)
+    g = 9.81  # m/s²
+
+    # Construir listas de áreas e inercias de elementos desde thickness_params
+    element_areas = []
+    element_inertias = []
+
+    for iEl in range(C.shape[0]):
+        d_outer = thickness_params[2*iEl]
+        d_inner = thickness_params[2*iEl + 1]
+
+        # Asegurar dimensiones válidas
+        min_wall = 0.002
+        if d_inner >= d_outer - min_wall:
+            d_inner = d_outer - min_wall
+        if d_inner < 0.001:
+            d_inner = 0.001
+
+        A, I = hollow_circular_section(d_outer, d_inner)
+        element_areas.append(A)
+        element_inertias.append(I)
+
+    # Generar reporte comprensivo usando la función de plotting_utils
+    report_dict = generate_comprehensive_report(
+        X, C, element_areas, element_inertias,
+        boom_top_nodes, boom_bot_nodes, tower_base,
+        E, rho_steel, g, load_range
+    )
+
+    return report_dict
 
 
 if __name__ == '__main__':

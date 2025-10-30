@@ -365,7 +365,7 @@ def analyze_moving_load():
 
             # Calcular peso propio basado en masa del elemento: Peso = ρ × V × g
             # Distribuir el peso de cada elemento equitativamente a sus dos nodos
-            rho_steel = 7850  # kg/m³ - densidad del acero
+            rho_steel = 7800  # kg/m³ - densidad del acero (según consigna TP2)
             g = 9.81  # m/s² - aceleración gravitacional
 
             for iEl in range(C.shape[0]):
@@ -501,7 +501,7 @@ def animate_moving_load(load_magnitude=30000, scale_factor=1, interval=200):
 
         # Calcular peso propio correctamente basado en masa del elemento
         # Distribuir el peso de cada elemento equitativamente a sus dos nodos
-        rho_steel = 7850  # kg/m³
+        rho_steel = 7800  # kg/m³ (según consigna TP2)
         g = 9.81  # m/s²
 
         for iEl in range(C.shape[0]):
@@ -609,14 +609,14 @@ def animate_moving_load(load_magnitude=30000, scale_factor=1, interval=200):
 
     return anim
 
-def generate_complete_report(load_range=(0, 100000)):
+def generate_complete_report(load_range=(0, 30000)):
     '''
     Generar reporte completo de la estructura con todos los gráficos y tablas
 
     Parámetros:
     -----------
     load_range : tuple
-        Rango de cargas a analizar (min, max) en Newtons (default: 0 a 100 kN)
+        Rango de cargas a analizar (min, max) en Newtons (default: 0 a 30 kN)
 
     Retorna:
     --------
@@ -629,7 +629,7 @@ def generate_complete_report(load_range=(0, 100000)):
 
     # Propiedades de material y sección
     E = 200e9  # Módulo de Young del acero (Pa)
-    rho_steel = 7850  # kg/m³
+    rho_steel = 7800  # kg/m³ (según consigna TP2)
     g = 9.81  # m/s²
 
     # Especificaciones de sección transversal circular hueca (en metros)
