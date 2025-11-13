@@ -417,8 +417,8 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
         d_outer = thickness_params[2*iEl]
         d_inner = thickness_params[2*iEl + 1]
 
-        # Asegurar interior < exterior con espesor de pared mínimo de 2mm
-        min_wall = 0.002  # 2mm espesor de pared mínimo
+        # Asegurar interior < exterior con espesor de pared mínimo de 10mm (muy robusto)
+        min_wall = 0.010  # 10mm espesor de pared mínimo para resistencia estructural
         if d_inner >= d_outer - min_wall:
             d_inner = d_outer - min_wall
 
@@ -510,17 +510,37 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
     penalty = 0
     min_FS = 2.0
 
+    # Penalización por espesores de pared insuficientes (crítico para pandeo)
+    min_required_wall = 0.010  # 10mm mínimo (aumentado para mejor resistencia a pandeo)
+    for iEl in range(n_elements):
+        d_outer = thickness_params[2*iEl]
+        d_inner = thickness_params[2*iEl + 1]
+        wall_thickness = (d_outer - d_inner) / 2
+
+        if wall_thickness < min_required_wall:
+            wall_violation = min_required_wall - wall_thickness
+            # Penalización EXTREMADAMENTE alta para evitar paredes delgadas que causan pandeo
+            penalty += 200000 * (wall_violation**3) + 100000 * (wall_violation**2)
+
+    # PENALIZACIONES EXTREMADAMENTE AGRESIVAS para hacer cumplir el FS mínimo como restricción dura
+    # Penalización exponencial que crece rápidamente cuando FS está por debajo del mínimo
     if FS_tension < min_FS:
-        penalty += 1000 * (min_FS - FS_tension)**2
+        violation = min_FS - FS_tension
+        # Penalización exponencial + cuadrática para convergencia rápida
+        penalty += 1000000 * (violation**3) + 300000 * (violation**2)
 
     if FS_pandeo < min_FS:
-        penalty += 1000 * (min_FS - FS_pandeo)**2
+        violation = min_FS - FS_pandeo
+        # Penalización MASIVA para pandeo (crítico para estabilidad)
+        penalty += 2000000 * (violation**3) + 500000 * (violation**2)
 
-    # Penalización por deflexión (máx 200mm en punta)
+    # Penalización por deflexión (máx 200mm en punta) - CRÍTICO
     tip_deflection = abs(D[boom_top_nodes[-1], 1])
     max_deflection = 0.200  # 200mm
     if tip_deflection > max_deflection:
-        penalty += 500 * (tip_deflection - max_deflection)**2
+        deflection_violation = tip_deflection - max_deflection
+        # Penalización MASIVA para deflexión (tan crítica como pandeo)
+        penalty += 1000000 * (deflection_violation**3) + 300000 * (deflection_violation**2)
 
     objective = cost + penalty
 
@@ -529,7 +549,9 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
 
     iteration_counter += 1
 
-    # Guardar gráfico SOLO si este es un mejor diseño
+    # Guardar gráfico SOLO si este es un mejor diseño Y cumple con los factores de seguridad
+    is_viable = (FS_tension >= min_FS) and (FS_pandeo >= min_FS)
+
     if objective < best_objective and objective < 1e7:  # Solo guardar diseños válidos que mejoran
         # Extraer parámetros de espesor
         expected_thickness_params = n_elements * 2
@@ -543,7 +565,10 @@ def evaluate_crane_design(design_vector, max_load=40000, verbose=False):
 
         best_objective = objective
         best_design_vector = design_vector.copy()  # Almacenar el mejor diseño
-        print(f"[Iter {iteration_counter}] NUEVO MEJOR! Objective: {objective:.2f} (Cost: {cost:.2f}, Penalty: {penalty:.2f})")
+
+        viability_status = "VIABLE ✓" if is_viable else "NO VIABLE (FS < 2.0)"
+        print(f"[Iter {iteration_counter}] NUEVO MEJOR! {viability_status} Objective: {objective:.2f} (Cost: {cost:.2f}, Penalty: {penalty:.2f})")
+        print(f"  FS_tension: {FS_tension:.2f}, FS_pandeo: {FS_pandeo:.2f}")
 
         # Verificar si pasó suficiente tiempo para guardar un checkpoint intermedio
         current_time = time.time()
@@ -605,12 +630,12 @@ def optimize_crane(maxiter=100, popsize=15):
     # d_outer_0, d_inner_0, d_outer_1, d_inner_1, ...]
 
     bounds = [
-        (8, 20),      # n_segments
-        (0.1, 1.0),   # boom_height
+        (12, 20),     # n_segments (aumentado mínimo: más segmentos = más rigidez)
+        (0.8, 1.5),   # boom_height (aumentado mínimo: mayor altura = mejor resistencia a pandeo)
         (0, 10),      # diag_type (ahora 0-10 incluyendo conectividad completa)
-        (1, 3),       # vertical_spacing
-        (1, 3),       # num_support_cables
-        (0.0, 1.0),   # taper_ratio (0=ahusamiento completo, 1=rectangular)
+        (1, 2),       # vertical_spacing (reducido máximo: más verticales = más rigidez)
+        (2, 3),       # num_support_cables (aumentado mínimo: más cables de soporte)
+        (0.5, 1.0),   # taper_ratio (más rectangular = mayor rigidez en la punta)
     ]
 
     # Agregar límites de espesor para máxima cantidad posible de elementos
@@ -618,30 +643,26 @@ def optimize_crane(maxiter=100, popsize=15):
     max_possible_elements = 600  # Sobrestimación conservadora para tipo 10
 
     for i in range(max_possible_elements):
-        bounds.append((0.010, 0.050))  # d_outer: 10mm a 50mm (restricción máx)
-        bounds.append((0.005, 0.045))  # d_inner: 5mm a 45mm
+        bounds.append((0.050, 0.050))  # d_outer: FIXED at 50mm
+        bounds.append((0.000, 0.000))  # d_inner: FIXED at 0mm - SOLID BARS (maximum strength)
 
     print(f"\nVariables de optimización: {len(bounds)}")
     print("\nIniciando optimización global (evolución diferencial)...")
     print("Esto puede tomar varios minutos...\n")
 
-    # Crear estimación inicial con diseño razonable
+    # Crear estimación inicial con diseño razonable y robusto
     initial_guess = []
-    initial_guess.append(12)   # n_segments
-    initial_guess.append(1.0)  # boom_height
-    initial_guess.append(0)    # diag_type (alternado)
-    initial_guess.append(1)    # vertical_spacing (cada nodo)
-    initial_guess.append(2)    # num_support_cables
-    initial_guess.append(0.0)  # taper_ratio (0=ahusamiento completo como el original)
+    initial_guess.append(16)   # n_segments (más segmentos para mayor rigidez)
+    initial_guess.append(1.2)  # boom_height (mayor altura para mejor resistencia)
+    initial_guess.append(3)    # diag_type (dobles - patrón X para máxima rigidez)
+    initial_guess.append(1)    # vertical_spacing (cada nodo - máxima rigidez)
+    initial_guess.append(3)    # num_support_cables (máximo soporte)
+    initial_guess.append(0.8)  # taper_ratio (casi rectangular para rigidez uniforme)
 
-    # Agregar espesores iniciales: puntales más gruesos que cables
+    # Agregar espesores iniciales: todos SÓLIDOS (50mm exterior, 0mm interior)
     for i in range(max_possible_elements):
-        if i < 40:  # Primeros elementos probablemente sean puntales
-            initial_guess.append(0.040)  # 40mm exterior
-            initial_guess.append(0.030)  # 30mm interior (10mm pared)
-        else:  # Elementos posteriores probablemente sean cables
-            initial_guess.append(0.025)  # 25mm exterior
-            initial_guess.append(0.020)  # 20mm interior (2.5mm pared)
+        initial_guess.append(0.050)  # 50mm exterior (FIJO)
+        initial_guess.append(0.000)  # 0mm interior - BARRAS SÓLIDAS (máxima resistencia)
 
     print("\nEvaluando diseño inicial...")
     initial_obj = evaluate_crane_design(np.array(initial_guess), max_load=40000, verbose=True)
@@ -677,6 +698,13 @@ def optimize_crane(maxiter=100, popsize=15):
     print("\nMejor diseño encontrado:")
     print("-"*80)
     best_obj = evaluate_crane_design(result.x, max_load=40000, verbose=True)
+
+    print("\n" + "="*80)
+    print("VERIFICACIÓN DE VIABILIDAD:")
+    print("="*80)
+    print("Para que la grúa sea VIABLE, ambos factores de seguridad deben ser ≥ 2.0")
+    print("(Los valores FS_tension y FS_pandeo se muestran arriba)")
+    print("-"*80)
 
     # Extraer y visualizar mejor diseño
     n_segments_opt = int(round(result.x[0]))
@@ -753,7 +781,7 @@ if __name__ == '__main__':
 
     # Parsear argumentos de línea de comandos
     maxiter = 5  # Default
-    popsize = 10   # Default
+    popsize = 5   # Default
 
     if len(sys.argv) > 1:
         try:

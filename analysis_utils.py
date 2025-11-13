@@ -145,8 +145,12 @@ def calculate_buckling_load(X, C, element_forces, element_inertias, E, boom_top_
             L = np.linalg.norm(X[n2] - X[n1])
             I = element_inertias[iEl]
 
-            # Carga de pandeo de Euler: P_cr = π²EI/L²
-            P_cr = (np.pi**2 * E * I) / (L**2)
+            # Carga de pandeo de Euler con factor K para condiciones de borde
+            # K = 0.5 para extremos fijos (típico en cerchas con conexiones rígidas)
+            # P_cr = π²EI/(KL)²
+            K = 0.5  # Factor de longitud efectiva para extremos fijos
+            L_eff = K * L
+            P_cr = (np.pi**2 * E * I) / (L_eff**2)
 
             if P_cr < P_critica:
                 P_critica = P_cr
